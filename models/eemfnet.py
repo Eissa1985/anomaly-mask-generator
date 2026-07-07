@@ -38,139 +38,153 @@ logger = logging.getLogger(__name__)
 
 if not hasattr(np, 'trapz'):
     np.trapz = np.trapezoid
-    
+
+class EMA:
+    """
+    ممتص الصدمات الرياضي: يحافظ على استقرار الأوزان ويمنع التذبذب العنيف في النتائج
+    """
+    def __init__(self, model, decay=0.995):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone().detach()
+
+    def update(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = self.decay * self.shadow[name] + (1.0 - self.decay) * param.data.detach()
+
+    def apply_shadow(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.backup[name] = param.data
+                param.data = self.shadow[name]
+
+    def restore(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                param.data = self.backup[name]
+        self.backup = {}
+
 class IndustrialAugmenter(nn.Module):
     def __init__(self, masks_root_dir, img_size=224, p_anomaly=0.5, p_blur=0.3, p_illum=0.4):
-        """
-        masks_root_dir: المسار الأساسي لمجلدات الأقنعة (مثلاً: "dataset/masks")
-        يجب أن يحتوي على المجلدات الفرعية: freeform, perlin, scratch
-        """
         super().__init__()
         self.img_size = img_size
         self.p_anomaly = p_anomaly
         self.p_blur = p_blur
         self.p_illum = p_illum
 
-        # 1. فهرسة كافة الأقنعة الجاهزة في الذاكرة لتسريع الوصول (Zero I/O Bottleneck)
+        # تسجيل قيم التقييس كـ Buffers لتعمل على كارت الشاشة (GPU) تلقائياً
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
         self.mask_paths = []
         for sub_dir in ["freeform", "perlin", "scratch"]:
             full_dir = os.path.join(masks_root_dir, sub_dir)
             if os.path.exists(full_dir):
-                # قراءة كل صيغ الصور المحتملة
                 paths = glob(os.path.join(full_dir, "*.*"))
                 self.mask_paths.extend([p for p in paths if p.endswith(('.png', '.jpg', '.bmp', '.tif'))])
         
         if len(self.mask_paths) == 0:
-            raise RuntimeError(f"لم يتم العثور على أي أقنعة في المسار: {masks_root_dir}. تأكد من وجود المجلدات الفرعية!")
+            raise RuntimeError(f"لم يتم العثور على أي أقنعة في المسار: {masks_root_dir}!")
             
-        print(f"--> [GPU Augmenter] Successfully loaded {len(self.mask_paths)} offline mask paths.")
+        print(f"--> [GPU Augmenter - Textile Edition] Successfully loaded {len(self.mask_paths)} offline mask paths.")
 
     def _sample_offline_masks(self, batch_size, device):
-        """
-        سحب أقنعة عشوائية من الـ 3000 قناع وتحميلها كـ Tensors على الـ GPU بسرعة فائقة
-        """
         sampled_paths = random.choices(self.mask_paths, k=batch_size)
         mask_tensors = []
-        
         for path in sampled_paths:
-            # قراءة سريعة على قناة واحدة (Grayscale)
             with Image.open(path) as img:
                 img_gray = img.convert("L")
-                # إعادة تحجيم سريع إذا كان مقاس القناع الجاهز يختلف عن img_size
                 if img_gray.size != (self.img_size, self.img_size):
-                    img_gray = img_gray.resize((self.img_size, self.img_size), Image.NEAREST)
-                
-                # تحويل إلى Tensor وتطبيع من [0, 255] إلى [0.0, 1.0]
+                    img_gray = img_gray.resize((self.img_size, self.img_size), Image.BILINEAR)
                 t_mask = TF.to_tensor(img_gray)
                 mask_tensors.append(t_mask)
         
-        # تجميع الدفعة بالكامل ونقلها للـ GPU دفعة واحدة
         batch_masks = torch.stack(mask_tensors, dim=0).to(device, non_blocking=True)
-        
-        # التأكد من الثنائية (Binarization) لتجنب قيم الاستيفاء الرمادية
-        return torch.where(batch_masks > 0.5, 1.0, 0.0)
+        batch_masks = F.avg_pool2d(batch_masks, kernel_size=3, stride=1, padding=1)
+        return (batch_masks / (batch_masks.max() + 1e-8)).clamp(0.0, 1.0)
 
     def _apply_motion_blur(self, x):
-        """
-        محاكاة اهتزاز وحركة خط الإنتاج السريعة (Anisotropic Motion Blur)
-        """
-        if torch.rand(1).item() > self.p_blur:
-            return x
-        
-        kernel_size = int(torch.randint(3, 9, (1,)).item()) | 1  # رقم فردي دائماً
+        if torch.rand(1).item() > self.p_blur: return x
+        kernel_size = int(torch.randint(3, 9, (1,)).item()) | 1
         kernel = torch.zeros((1, 1, kernel_size, kernel_size), device=x.device)
-        
         if torch.rand(1).item() > 0.5:
-            kernel[0, 0, kernel_size // 2, :] = 1.0 / kernel_size  # حركة أفقية (سحب القماش)
+            kernel[0, 0, kernel_size // 2, :] = 1.0 / kernel_size
         else:
-            kernel[0, 0, :, kernel_size // 2] = 1.0 / kernel_size  # حركة رأسية
-            
+            kernel[0, 0, :, kernel_size // 2] = 1.0 / kernel_size
         kernel = kernel.repeat(x.shape[1], 1, 1, 1)
-        x_blurred = F.conv2d(x, kernel, padding=kernel_size//2, groups=x.shape[1])
-        return x_blurred
+        return F.conv2d(x, kernel, padding=kernel_size//2, groups=x.shape[1])
 
     def _apply_illumination_gradient(self, x):
-        """
-        محاكاة الظلال وتغير الإضاءة على القماش على خط الإنتاج.
-        """
-        if torch.rand(1).item() > self.p_illum:
-            return x
-            
+        if torch.rand(1).item() > self.p_illum: return x
         b, c, h, w = x.shape
-        y_grid, x_grid = torch.meshgrid(
-            torch.linspace(-1, 1, h, device=x.device),
-            torch.linspace(-1, 1, w, device=x.device),
-            indexing='ij'
-        )
-        
+        y_grid, x_grid = torch.meshgrid(torch.linspace(-1, 1, h, device=x.device),
+                                        torch.linspace(-1, 1, w, device=x.device), indexing='ij')
         angle = torch.rand(1, device=x.device) * 2 * math.pi
         gradient = (x_grid * torch.cos(angle) + y_grid * torch.sin(angle))
-        
         gradient = 0.7 + 0.6 * ((gradient - gradient.min()) / (gradient.max() - gradient.min() + 1e-8))
         gradient = gradient.unsqueeze(0).unsqueeze(0).expand_as(x)
-        
         return torch.clamp(x * gradient, 0.0, 1.0)
 
+    def _generate_realistic_textile_defect(self, images, masks):
+        b, c, h, w = images.shape
+        device = images.device
+        defect_type = random.choice(['stain_dark', 'stain_light', 'structural_disruption'])
+        
+        if defect_type == 'stain_dark':
+            darken_factor = torch.empty((b, 1, 1, 1), device=device).uniform_(0.3, 0.6)
+            modified_fabric = images * darken_factor
+        elif defect_type == 'stain_light':
+            lighten_factor = torch.empty((b, 1, 1, 1), device=device).uniform_(1.4, 1.9)
+            modified_fabric = torch.clamp(images * lighten_factor, 0.0, 1.0)
+        else:
+            blurred_fabric = F.avg_pool2d(images, kernel_size=7, stride=1, padding=3)
+            gray_noise = torch.randn((b, 1, h, w), device=device) * 0.15
+            gray_noise = gray_noise.repeat(1, c, 1, 1)
+            modified_fabric = torch.clamp(blurred_fabric + gray_noise, 0.0, 1.0)
+            
+        corrupted_images = images * (1.0 - masks) + modified_fabric * masks
+        return corrupted_images
+
     def forward(self, images, anomaly_textures=None):
-        """
-        images: صور الأقمشة النظيفة من الـ DataLoader بأبعاد (B, C, H, W)
-        anomaly_textures: (اختياري) خامات عيوب خارجية لنقلها داخل القناع
-        """
         batch_size = images.shape[0]
         device = images.device
         
-        # 1. تطبيق تأثيرات البيئة الصناعية (ظلال واهتزاز) على الصورة النظيفة أولاً
+        # --- الإصلاح الجذري 1: فك التقييس (De-normalization) ---
+        # إرجاع الصورة من النطاق [-2.1, 2.6] إلى النطاق اللوني الحقيقي [0.0, 1.0]
+        images = (images * self.std) + self.mean
+        images = images.clamp(0.0, 1.0)
+        
         images = self._apply_illumination_gradient(images)
         images = self._apply_motion_blur(images)
         
-        # 2. تحديد الصور التي سيتم حقن العيوب بها (50% من الدفعة مثلاً)
         inject_mask = (torch.rand(batch_size, device=device) < self.p_anomaly).float().view(batch_size, 1, 1, 1)
         
         if inject_mask.sum() == 0:
             zeros_mask = torch.zeros((batch_size, 1, self.img_size, self.img_size), device=device)
-            return images, zeros_mask, torch.zeros(batch_size, device=device, dtype=torch.long)
+            # يجب إعادة التقييس حتى للصور السليمة!
+            return (images - self.mean) / self.std, zeros_mask, torch.zeros(batch_size, device=device, dtype=torch.long)
             
-        # 3. سحب الأقنعة الجاهزة (Offline Masks) من الـ 3000 قناع وتطبيق قناع الحقن عليها
         fault_masks = self._sample_offline_masks(batch_size, device) * inject_mask
         
-        # 4. حقن الشذوذ الفعلي داخل القماش
         if anomaly_textures is not None and anomaly_textures.shape[0] == batch_size:
-            # دمج نسيج خارجي (مثل صورة صدأ، تمزق، أو خيط لون مختلف) في منطقة القناع
-            corrupted_images = images * (1 - fault_masks) + anomaly_textures * fault_masks
+            corrupted_images = images * (1.0 - fault_masks) + anomaly_textures * fault_masks
         else:
-            # طريقة ذكية: إذا لم تمرر نسيج خارجي، نقوم بإنشاء "تغير تبايني/لوني شاذ" 
-            # في نفس النسيج الأصلي لمحاكاة بقع الزيت، بلل القماش، أو الاحتراق الطفيف
-            color_shift = torch.randn((batch_size, images.shape[1], 1, 1), device=device) * 0.4
-            intensity_factor = torch.empty((batch_size, 1, 1, 1), device=device).uniform_(0.3, 1.7)
+            corrupted_images = self._generate_realistic_textile_defect(images, fault_masks)
             
-            modified_fabric = torch.clamp((images * intensity_factor) + color_shift, 0.0, 1.0)
-            corrupted_images = images * (1 - fault_masks) + modified_fabric * fault_masks
+        # --- الإصلاح الجذري 2: إعادة التقييس (Re-normalization) ---
+        # إعادة تجهيز الصورة ليفهمها الـ Backbone المُدرب على ImageNet
+        corrupted_images = (corrupted_images - self.mean) / self.std
             
-        # 5. إعداد التسميات (Labels): 0 للنسيج السليم، 1 إذا احتوت الصورة على بكسل واحد معيب على الأقل
-        targets = (fault_masks.view(batch_size, -1).max(dim=1)[0] > 0).long()
+        targets = (fault_masks.view(batch_size, -1).max(dim=1)[0] > 0.1).long()
+        train_masks = torch.where(fault_masks > 0.2, 1.0, 0.0)
         
-        return corrupted_images, fault_masks, targets
-    
+        return corrupted_images, train_masks, targets
+        
 class ChannelProjector(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(ChannelProjector, self).__init__()
@@ -216,13 +230,13 @@ class EEMFNet(nn.Module):
                 pretrained=True,
                 features_only=True
             )
-            # for p in self.cnn_backbone.parameters():
-            #         p.requires_grad = False
-            for name, param in self.cnn_backbone.named_parameters():
-                if "blocks.4" in name or "blocks.5" in name or "conv_head" in name:
-                    param.requires_grad = True
-                else:
-                    param.requires_grad = False
+            for p in self.cnn_backbone.parameters():
+                    p.requires_grad = True
+            # for name, param in self.cnn_backbone.named_parameters():
+            #     if "blocks.4" in name or "blocks.5" in name or "conv_head" in name:
+            #         param.requires_grad = True
+            #     else:
+            #         param.requires_grad = False
 
         except RuntimeError as e:
             logger.warning(f"Error.... Default indices failed for {backbone_name}, trying default behavior. c: {e}")
@@ -395,14 +409,15 @@ class EEMFNet(nn.Module):
         logger.info(f"--> Starting Training for {num_training_steps} epochs...")
         train_mode = True
         epoch = 0
-
+        ema = EMA(self, decay=0.995)
+        
         # for epoch in range(num_training_steps):
         while train_mode:  
             if hasattr(train_loader.dataset, "set_epoch"):
                 train_loader.dataset.set_epoch(epoch)
             # logger.info(f"Epoch {epoch}: Difficulty Level {train_loader.dataset.difficulty_level:.2f}")    
             self.train() 
-            self.cnn_backbone.eval()
+            # self.cnn_backbone.eval()
             # self.cnn_backbone.layer4.train()
             total_loss = 0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_training_steps}", leave=False)
@@ -437,6 +452,9 @@ class EEMFNet(nn.Module):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 optimizer.step()
+
+                ema.update()
+                
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': loss.item()})
 
@@ -452,7 +470,11 @@ class EEMFNet(nn.Module):
             if (test_loader and ((epoch+1) % self.config.val_interval == 0)) or (epoch==0):
                 logger.info(f"\n[Epoch {epoch+1}] Validating...")
 
+                ema.apply_shadow()
+
                 eval_metrics, fps, optimal_threshold = self.predict(test_loader)
+
+                ema.restore()
 
                 log_payload.update({
                     "val/img_auc": eval_metrics['AUROC-image'],
@@ -486,7 +508,7 @@ class EEMFNet(nn.Module):
                     best_epoch = epoch
 
                     if save_dir:
-                        save_path = os.path.join(save_dir, "best_model.pth")
+                        save_path = os.path.join(save_dir, "best_model.pth")                        
                         eval_log = dict([(f'eval_{k}', v) for k, v in eval_metrics.items()])
 
                         state = {
@@ -498,8 +520,13 @@ class EEMFNet(nn.Module):
 
                         json.dump(state, open(os.path.join(save_dir, 'best_score.json'),'w'), indent='\t')
 
+                        ema.apply_shadow()
+                        
                         state_dict_cpu = {k: v.cpu() for k, v in self.state_dict().items()}
                         torch.save(state_dict_cpu, save_path)
+
+                        ema.restore()
+                        
                         logger.info(f"Epoch {epoch+1}:Img-AUC: {eval_metrics['AUROC-image']:.4f} | Px-AUC: {eval_metrics['AUROC-pixel']:.4f} | PRO: {eval_metrics['AUPRO-pixel']:.4f} | F1-Score: {eval_metrics['F1-pixel']:.4f} | Optimal-Threshold: {optimal_threshold:.4f} | inference speed: {fps:.4f} s")
                         logger.info(f"Epoch {epoch+1}: finished. Avg Loss: {avg_loss:.6f}")
                         logger.info(f"   >> New Best Model Saved!")
