@@ -70,7 +70,6 @@ class IndustrialAugmenter(nn.Module):
         سحب أقنعة عشوائية من الـ 3000 قناع وتحميلها كـ Tensors على الـ GPU بسرعة فائقة
         """
         sampled_paths = random.choices(self.mask_paths, k=batch_size)
-        print(sampled_paths)
         mask_tensors = []
         
         for path in sampled_paths:
@@ -387,7 +386,7 @@ class EEMFNet(nn.Module):
         pc_criterion = CompositeLoss()
         spectral_criterion = SpectralLoss(loss_weight=self.config.spectral_weight)
         
-        composite_weight = self.config.c_weight
+        composite_weight = self.config.composite_weight
         focal_weight = self.config.focal_weight
         best_score = -1.0
         best_AP = -1.0
@@ -426,8 +425,10 @@ class EEMFNet(nn.Module):
                 if isinstance(outputs, (list, tuple)): outputs = outputs[0]
 
                 masks = masks.float()
-                loss_c = pc_criterion(outputs[:, 1, :, :], masks)
-                loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
+                # loss_c = pc_criterion(outputs[:, 1, :, :], masks)
+                loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
+                # loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
+                loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
                 loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
 
                 loss.backward()
