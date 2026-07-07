@@ -414,24 +414,28 @@ class EEMFNet(nn.Module):
                 
                 with torch.no_grad():
                     images, masks, targets = self.augmenter(raw_images)
-            
+
+                if masks.dim() == 4:
+                    masks = masks.squeeze(1)
+
                 optimizer.zero_grad(set_to_none=True)
                 
                 outputs = self(images)
 
                 loss_f = focal_criterion(outputs, masks)
-                outputs = F.softmax(outputs, dim=1)
+                # outputs = F.softmax(outputs, dim=1)
 
                 if isinstance(outputs, (list, tuple)): outputs = outputs[0]
 
                 masks = masks.float()
-                # loss_c = pc_criterion(outputs[:, 1, :, :], masks)
-                loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
-                # loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
-                loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
+                loss_c = pc_criterion(outputs[:, 1, :, :], masks)
+                # loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
+                loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
+                # loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
                 loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
 
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 optimizer.step()
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': loss.item()})
@@ -463,7 +467,6 @@ class EEMFNet(nn.Module):
                     "val/optimal_threshold": optimal_threshold
                 })
 
-                current_dataset = train_loader.dataset
                 current_AP = eval_metrics["AP-pixel"]
                 # current_score = eval_metrics["AUPRO-pixel"]
 
@@ -475,52 +478,46 @@ class EEMFNet(nn.Module):
                     eval_metrics["AP-pixel"]
                     ])
 
-                if hasattr(current_dataset, 'save_and_reinforce'):
-                    if best_score < current_score:
+                if best_score < current_score:
+                    if  num_training_steps-epoch < 10:
+                        num_training_steps = num_training_steps + 10
+                    # best_score = np.mean(list(eval_metrics.values()))
+                    best_score = current_score
+                    best_epoch = epoch
+
+                    if save_dir:
+                        save_path = os.path.join(save_dir, "best_model.pth")
+                        eval_log = dict([(f'eval_{k}', v) for k, v in eval_metrics.items()])
+
+                        state = {
+                                'best_epoch': best_epoch+1,
+                                'inference_speed': f"{fps:.4f} s",
+                                'optimal_threshold': f"{optimal_threshold:.4f}",
+                                'metrics': eval_log
+                            }
+
+                        json.dump(state, open(os.path.join(save_dir, 'best_score.json'),'w'), indent='\t')
+
+                        state_dict_cpu = {k: v.cpu() for k, v in self.state_dict().items()}
+                        torch.save(state_dict_cpu, save_path)
+                        logger.info(f"Epoch {epoch+1}:Img-AUC: {eval_metrics['AUROC-image']:.4f} | Px-AUC: {eval_metrics['AUROC-pixel']:.4f} | PRO: {eval_metrics['AUPRO-pixel']:.4f} | F1-Score: {eval_metrics['F1-pixel']:.4f} | Optimal-Threshold: {optimal_threshold:.4f} | inference speed: {fps:.4f} s")
+                        logger.info(f"Epoch {epoch+1}: finished. Avg Loss: {avg_loss:.6f}")
+                        logger.info(f"   >> New Best Model Saved!")
+
+                    if self.config.use_wandb:
+                        wandb.run.summary["best_img_auc"] = eval_metrics['AUROC-image']
+                        wandb.run.summary["best_pixel_auc"] = eval_metrics['AUROC-pixel']
+                        wandb.run.summary["best_aupro"] = eval_metrics['AUPRO-pixel']
+                        wandb.run.summary["best_pixel_ap"] = eval_metrics['AP-pixel']
+                        wandb.run.summary["best_IoU-pixel"] = eval_metrics['IoU-pixel']
+                        wandb.run.summary["best_F1-pixel"] = eval_metrics['F1-pixel']
+                        wandb.run.summary["best_epoch"] = epoch + 1
+                else:
+                    if best_AP < current_AP:
+                        best_AP = current_AP
                         if  num_training_steps-epoch < 10:
                             num_training_steps = num_training_steps + 10
-                        # best_score = np.mean(list(eval_metrics.values()))
-                        best_score = current_score
-                        best_epoch = epoch
-                        current_dataset.save_and_reinforce()
 
-                        if save_dir:
-                            save_path = os.path.join(save_dir, "best_model.pth")
-                            eval_log = dict([(f'eval_{k}', v) for k, v in eval_metrics.items()])
-
-                            state = {
-                                    'best_epoch': best_epoch+1,
-                                    'inference_speed': f"{fps:.4f} s",
-                                    'optimal_threshold': f"{optimal_threshold:.4f}",
-                                    'metrics': eval_log
-                                }
-
-                            json.dump(state, open(os.path.join(save_dir, 'best_score.json'),'w'), indent='\t')
-
-                            state_dict_cpu = {k: v.cpu() for k, v in self.state_dict().items()}
-                            torch.save(state_dict_cpu, save_path)
-                            logger.info(f"Epoch {epoch+1}:Img-AUC: {eval_metrics['AUROC-image']:.4f} | Px-AUC: {eval_metrics['AUROC-pixel']:.4f} | PRO: {eval_metrics['AUPRO-pixel']:.4f} | F1-Score: {eval_metrics['F1-pixel']:.4f} | Optimal-Threshold: {optimal_threshold:.4f} | inference speed: {fps:.4f} s")
-                            logger.info(f"Epoch {epoch+1}: finished. Avg Loss: {avg_loss:.6f}")
-                            logger.info(f"   >> New Best Model Saved!")
-
-                        if self.config.use_wandb:
-                            wandb.run.summary["best_img_auc"] = eval_metrics['AUROC-image']
-                            wandb.run.summary["best_pixel_auc"] = eval_metrics['AUROC-pixel']
-                            wandb.run.summary["best_aupro"] = eval_metrics['AUPRO-pixel']
-                            wandb.run.summary["best_pixel_ap"] = eval_metrics['AP-pixel']
-                            wandb.run.summary["best_IoU-pixel"] = eval_metrics['IoU-pixel']
-                            wandb.run.summary["best_F1-pixel"] = eval_metrics['F1-pixel']
-                            wandb.run.summary["best_epoch"] = epoch + 1
-                    else:
-                        if best_AP < current_AP:
-                            best_AP = current_AP
-                            if  num_training_steps-epoch < 10:
-                                num_training_steps = num_training_steps + 10
-                        if current_dataset.forced_weights is not None:
-                            current_dataset.switch_to_exploration()
-
-                        else:
-                            current_dataset.check_and_rollback()
             else:
                 logger.info(f"Epoch {epoch+1} finished. Avg Loss: {avg_loss:.6f}")
 
