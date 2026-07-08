@@ -69,6 +69,7 @@ class EMA:
                 param.data = self.backup[name]
         self.backup = {}
 
+
 class IndustrialAugmenter(nn.Module):
     def __init__(self, masks_root_dir, img_size=224, p_anomaly=0.5, p_blur=0.3, p_illum=0.4):
         super().__init__()
@@ -210,6 +211,130 @@ class ChannelProjector(nn.Module):
 #     def forward(self, x):
 #         return self.projector(x)
 
+class AnomalyTransplanter(nn.Module):
+    def __init__(self, anomaly_root_dir, target, img_size=224, p_anomaly=0.5, p_blur=0.3, p_illum=0.4):
+        """
+        نسخة صناعية مطورة تمنع الألوان الفسفورية وتولد عيوب نسيج وأقمشة واقعية 100%
+        """
+        super().__init__()
+        self.img_size = img_size
+        self.p_anomaly = p_anomaly
+        self.p_blur = p_blur
+        self.p_illum = p_illum
+
+        # 1. تحميل كافة الأقنعة الجاهزة في الذاكرة لتسريع الوصول
+        self.anomaly_source_path = []
+        sub_dir = target
+        full_dir = os.path.join(anomaly_root_dir, sub_dir)
+        print(full_dir)
+        if os.path.exists(full_dir):
+            paths = glob(os.path.join(full_dir, "*/*.*"))
+            self.anomaly_source_path.extend([p for p in paths if p.endswith(('.png', '.jpg', '.bmp', '.tif'))])
+        
+        if len(self.anomaly_source_path) == 0:
+            raise RuntimeError(f"لم يتم العثور على أي أقنعة في المسار: {full_dir}!")
+            
+        print(f"--> [GPU Augmenter - Textile Edition] Successfully loaded {len(self.anomaly_source_path)} offline mask paths.")
+
+    def transplant_anomaly(self, images, inject_mask, device):
+        b, c, h, w = images.shape
+        
+        # إنشاء مصفوفات النتائج مبدئياً كنسخ نظيفة
+        result_images = images.clone()
+        final_masks = torch.zeros((b, 1, h, w), device=device)
+        
+        # --- الفلترة الذكية ---
+        # استخراج فهارس (Indices) الصور التي تم اختيارها للتشويه فقط
+        inject_indices = [i for i in range(b) if inject_mask[i, 0, 0, 0].item() > 0]
+        
+        # إذا لم يتم اختيار أي صورة، نرجع المصفوفات النظيفة فوراً
+        if len(inject_indices) == 0:
+            return result_images, final_masks
+            
+        # سحب مسارات عشوائية بعدد الصور المطلوبة فقط!
+        sampled_paths = random.choices(self.anomaly_source_path, k=len(inject_indices))
+        
+        # المرور فقط على الصور التي سيتم تشويهها
+        for idx, path in zip(inject_indices, sampled_paths):
+            
+            # 1. قراءة صورة العيب
+            with Image.open(path) as a_img:
+                a_img = a_img.convert("RGB")
+                if a_img.size != (self.img_size, self.img_size):
+                    a_img = a_img.resize((self.img_size, self.img_size))
+                t_img = TF.to_tensor(np.array(a_img)).to(device, non_blocking=True)
+                    
+            # 2. قراءة قناع العيب
+            mask_path = path.replace('images', 'masks')
+            base_name, ext = os.path.splitext(mask_path)
+            mask_path = base_name + '_mask' + ext
+            with Image.open(mask_path) as msk:
+                msk = msk.convert("L")
+                if msk.size != (self.img_size, self.img_size):
+                    # استخدام NEAREST للحفاظ على القناع حاداً وثنائياً كما في الكود القديم
+                    msk = msk.resize((self.img_size, self.img_size), Image.NEAREST)
+                m_img = TF.to_tensor(np.array(msk)).to(device, non_blocking=True)[0]
+            
+            # 3. إيجاد حدود العيب واقتطاعه
+            indices = torch.nonzero(m_img > 0)
+            if indices.size(0) == 0:
+                continue # تخطي إذا كان القناع فارغاً
+                
+            y_min, x_min = torch.min(indices, dim=0)[0]
+            y_max, x_max = torch.max(indices, dim=0)[0]
+            
+            # --- الإصلاح الأول: إضافة +1 لضمان أخذ كامل مساحة العيب (Slicing Fix) ---
+            crop_mask = m_img[y_min:y_max+1, x_min:x_max+1]
+            crop_anomaly = t_img[:, y_min:y_max+1, x_min:x_max+1]
+            
+            # --- الإصلاح الثاني: تحويل القناع إلى ثنائي بصرامة (Binary Mask) ---
+            hard_mask = (crop_mask > 0).float()
+            crop_anomaly = crop_anomaly * hard_mask
+            
+            c_h, c_w = crop_mask.shape
+            
+            # 4. اختيار مكان عشوائي للدمج
+            max_h = max(1, h - c_h)
+            max_w = max(1, w - c_w)
+            
+            place_h = random.randint(0, max_h - 1)
+            place_w = random.randint(0, max_w - 1)
+            
+            # 5. دمج العيب في الصورة 
+            target_roi = result_images[idx, :, place_h:place_h+c_h, place_w:place_w+c_w]
+            
+            # --- الإصلاح الثالث: الاستبدال القاسي بدلاً من الدمج الناعم (Hard Replacement) ---
+            # هذا يطابق كودك القديم bg_img[result_img > 0] = 0 تماماً
+            anomaly_exists = (crop_anomaly > 0).any(dim=0).float() 
+            
+            result_images[idx, :, place_h:place_h+c_h, place_w:place_w+c_w] = target_roi * (1.0 - anomaly_exists) + crop_anomaly
+            final_masks[idx, 0, place_h:place_h+c_h, place_w:place_w+c_w] = hard_mask
+
+        return result_images, final_masks
+    
+    def forward(self, images, anomaly_textures=None):
+        batch_size = images.shape[0]
+        device = images.device
+        
+        # 2. قناع اختيار الصور التي سيحقن بها عيوب
+        inject_mask = (torch.rand(batch_size, device=device) < self.p_anomaly).float().view(batch_size, 1, 1, 1)
+        
+        # print(inject_mask)
+        
+        if inject_mask.sum() == 0:
+            zeros_mask = torch.zeros((batch_size, 1, self.img_size, self.img_size), device=device)
+            return images, zeros_mask, torch.zeros(batch_size, device=device, dtype=torch.long)
+            
+        # 3. سحب الأقنعة الجاهزة (تصبح ناعمة الحواف الآن)
+        a_imgs, fault_masks = self.transplant_anomaly(images, inject_mask, device)
+        
+        targets = (fault_masks.view(batch_size, -1).max(dim=1)[0] > 0.1).long()
+        
+        # إعادة تقريب القناع ليكون ثنايياً لحسابات الخسارة الدقيقة في التدريب
+        train_masks = torch.where(fault_masks > 0.2, 1.0, 0.0)
+        
+        return a_imgs, train_masks, targets
+        
 class EEMFNet(nn.Module):
     def __init__(self, device='cpu', config=None):
         super(EEMFNet, self).__init__()
@@ -243,12 +368,21 @@ class EEMFNet(nn.Module):
 
         cnn_channels = self.cnn_backbone.feature_info.channels()
         
-        self.augmenter = IndustrialAugmenter(
-            masks_root_dir="dataset/masks",  # ضع هنا المسار الدقيق لمجلد masks لديك
-            img_size=self.config.img_size,           # 224 أو 256 أو حسب إعداداتك
-            p_anomaly=0.5,                   # احتمال حقن عيب في الصورة
-            p_blur=0.3,                      # احتمال اهتزاز حزام ماكينة النسيج
-            p_illum=0.4                      # احتمال تغير الظلال والإضاءة
+        # self.augmenter = IndustrialAugmenter(
+        #     masks_root_dir="dataset/masks",  # ضع هنا المسار الدقيق لمجلد masks لديك
+        #     img_size=self.config.img_size,           # 224 أو 256 أو حسب إعداداتك
+        #     p_anomaly=0.5,                   # احتمال حقن عيب في الصورة
+        #     p_blur=0.3,                      # احتمال اهتزاز حزام ماكينة النسيج
+        #     p_illum=0.4                      # احتمال تغير الظلال والإضاءة
+        # ).to(device)
+        
+        self.augmenter = AnomalyTransplanter(
+            anomaly_root_dir="dataset/anomaly_generation_datasets/images",
+            target = "carpet",
+            img_size=224, 
+            p_anomaly=0.5,  # 1.0 لضمان ظهور الشذوذ في كل صور الباتش للتجربة
+            p_blur=1.0,     
+            p_illum=1.0     
         ).to(device)
         
         # mit_dims = (64, 128, 320, 512)
