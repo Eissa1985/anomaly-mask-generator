@@ -5,8 +5,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from losses import CompositeLoss, FocalLoss, SpectralLoss
-import torchvision.transforms as transforms
-
 import torch.optim as optim
 from tqdm import tqdm
 import time
@@ -41,125 +39,6 @@ logger = logging.getLogger(__name__)
 if not hasattr(np, 'trapz'):
     np.trapz = np.trapezoid
 
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
-
-# class IndustrialAugmenter(nn.Module):
-#     def __init__(self, masks_root_dir, img_size=224, p_anomaly=0.5, p_blur=0.3, p_illum=0.4):
-#         super().__init__()
-#         self.img_size = img_size
-#         self.p_anomaly = p_anomaly
-#         self.p_blur = p_blur
-#         self.p_illum = p_illum
-
-#         # # تسجيل قيم التقييس كـ Buffers لتعمل على كارت الشاشة (GPU) تلقائياً
-#         # self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
-#         # self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
-
-#         self.mask_paths = []
-#         for sub_dir in ["freeform", "perlin", "scratch"]:
-#             full_dir = os.path.join(masks_root_dir, sub_dir)
-#             if os.path.exists(full_dir):
-#                 paths = glob(os.path.join(full_dir, "*.*"))
-#                 self.mask_paths.extend([p for p in paths if p.endswith(('.png', '.jpg', '.bmp', '.tif'))])
-        
-#         if len(self.mask_paths) == 0:
-#             raise RuntimeError(f"لم يتم العثور على أي أقنعة في المسار: {masks_root_dir}!")
-            
-#         print(f"--> [GPU Augmenter - Textile Edition] Successfully loaded {len(self.mask_paths)} offline mask paths.")
-
-#     def _sample_offline_masks(self, batch_size, device):
-#         sampled_paths = random.choices(self.mask_paths, k=batch_size)
-#         mask_tensors = []
-#         for path in sampled_paths:
-#             with Image.open(path) as img:
-#                 img_gray = img.convert("L")
-#                 if img_gray.size != (self.img_size, self.img_size):
-#                     img_gray = img_gray.resize((self.img_size, self.img_size), Image.BILINEAR)
-#                 t_mask = TF.to_tensor(img_gray)
-#                 mask_tensors.append(t_mask)
-        
-#         batch_masks = torch.stack(mask_tensors, dim=0).to(device, non_blocking=True)
-#         batch_masks = F.avg_pool2d(batch_masks, kernel_size=3, stride=1, padding=1)
-#         return (batch_masks / (batch_masks.max() + 1e-8)).clamp(0.0, 1.0)
-
-#     def _apply_motion_blur(self, x):
-#         if torch.rand(1).item() > self.p_blur: return x
-#         kernel_size = int(torch.randint(3, 9, (1,)).item()) | 1
-#         kernel = torch.zeros((1, 1, kernel_size, kernel_size), device=x.device)
-#         if torch.rand(1).item() > 0.5:
-#             kernel[0, 0, kernel_size // 2, :] = 1.0 / kernel_size
-#         else:
-#             kernel[0, 0, :, kernel_size // 2] = 1.0 / kernel_size
-#         kernel = kernel.repeat(x.shape[1], 1, 1, 1)
-#         return F.conv2d(x, kernel, padding=kernel_size//2, groups=x.shape[1])
-
-#     def _apply_illumination_gradient(self, x):
-#         if torch.rand(1).item() > self.p_illum: return x
-#         b, c, h, w = x.shape
-#         y_grid, x_grid = torch.meshgrid(torch.linspace(-1, 1, h, device=x.device),
-#                                         torch.linspace(-1, 1, w, device=x.device), indexing='ij')
-#         angle = torch.rand(1, device=x.device) * 2 * math.pi
-#         gradient = (x_grid * torch.cos(angle) + y_grid * torch.sin(angle))
-#         gradient = 0.7 + 0.6 * ((gradient - gradient.min()) / (gradient.max() - gradient.min() + 1e-8))
-#         gradient = gradient.unsqueeze(0).unsqueeze(0).expand_as(x)
-#         return torch.clamp(x * gradient, 0.0, 1.0)
-
-#     def _generate_realistic_textile_defect(self, images, masks):
-#         b, c, h, w = images.shape
-#         device = images.device
-#         defect_type = random.choice(['stain_dark', 'stain_light', 'structural_disruption'])
-        
-#         if defect_type == 'stain_dark':
-#             darken_factor = torch.empty((b, 1, 1, 1), device=device).uniform_(0.3, 0.6)
-#             modified_fabric = images * darken_factor
-#         elif defect_type == 'stain_light':
-#             lighten_factor = torch.empty((b, 1, 1, 1), device=device).uniform_(1.4, 1.9)
-#             modified_fabric = torch.clamp(images * lighten_factor, 0.0, 1.0)
-#         else:
-#             blurred_fabric = F.avg_pool2d(images, kernel_size=7, stride=1, padding=3)
-#             gray_noise = torch.randn((b, 1, h, w), device=device) * 0.15
-#             gray_noise = gray_noise.repeat(1, c, 1, 1)
-#             modified_fabric = torch.clamp(blurred_fabric + gray_noise, 0.0, 1.0)
-            
-#         corrupted_images = images * (1.0 - masks) + modified_fabric * masks
-#         return corrupted_images
-
-#     def forward(self, images, anomaly_textures=None):
-#         batch_size = images.shape[0]
-#         device = images.device
-        
-#         # # --- الإصلاح الجذري 1: فك التقييس (De-normalization) ---
-#         # # إرجاع الصورة من النطاق [-2.1, 2.6] إلى النطاق اللوني الحقيقي [0.0, 1.0]
-#         # images = (images * self.std) + self.mean
-#         # images = images.clamp(0.0, 1.0)
-        
-#         images = self._apply_illumination_gradient(images)
-#         images = self._apply_motion_blur(images)
-        
-#         inject_mask = (torch.rand(batch_size, device=device) < self.p_anomaly).float().view(batch_size, 1, 1, 1)
-        
-#         if inject_mask.sum() == 0:
-#             zeros_mask = torch.zeros((batch_size, 1, self.img_size, self.img_size), device=device)
-#             # يجب إعادة التقييس حتى للصور السليمة!
-#             return (images - self.mean) / self.std, zeros_mask, torch.zeros(batch_size, device=device, dtype=torch.long)
-            
-#         fault_masks = self._sample_offline_masks(batch_size, device) * inject_mask
-        
-#         if anomaly_textures is not None and anomaly_textures.shape[0] == batch_size:
-#             corrupted_images = images * (1.0 - fault_masks) + anomaly_textures * fault_masks
-#         else:
-#             corrupted_images = self._generate_realistic_textile_defect(images, fault_masks)
-            
-#         # --- الإصلاح الجذري 2: إعادة التقييس (Re-normalization) ---
-#         # إعادة تجهيز الصورة ليفهمها الـ Backbone المُدرب على ImageNet
-#         corrupted_images = (corrupted_images - self.mean) / self.std
-            
-#         targets = (fault_masks.view(batch_size, -1).max(dim=1)[0] > 0.1).long()
-#         train_masks = torch.where(fault_masks > 0.2, 1.0, 0.0)
-        
-#         return corrupted_images, train_masks, targets
-        
 class ChannelProjector(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(ChannelProjector, self).__init__()
@@ -196,19 +75,6 @@ class AnomalyTransplanter(nn.Module):
         self.p_blur = p_blur
         self.p_illum = p_illum
 
-        self.transform_img = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.CenterCrop(self.imagesize),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ])
-
-        self.transform_mask = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.CenterCrop(self.imagesize),
-            transforms.ToTensor(),
-        ])
-        
         # 1. تحميل كافة الأقنعة الجاهزة في الذاكرة لتسريع الوصول
         self.anomaly_source_path = []
         sub_dir = target
@@ -302,7 +168,7 @@ class AnomalyTransplanter(nn.Module):
     def forward(self, images, anomaly_textures=None):
         batch_size = images.shape[0]
         device = images.device
-        
+        # print(images.shape)
         # 2. قناع اختيار الصور التي سيحقن بها عيوب
         inject_mask = (torch.rand(batch_size, device=device) < self.p_anomaly).float().view(batch_size, 1, 1, 1)
         
@@ -347,7 +213,7 @@ class EEMFNet(nn.Module):
                 features_only=True
             )
             for p in self.cnn_backbone.parameters():
-                    p.requires_grad = True
+                    p.requires_grad = False
             # for name, param in self.cnn_backbone.named_parameters():
             #     if "blocks.4" in name or "blocks.5" in name or "conv_head" in name:
             #         param.requires_grad = True
@@ -359,14 +225,6 @@ class EEMFNet(nn.Module):
 
         cnn_channels = self.cnn_backbone.feature_info.channels()
         
-        # self.augmenter = IndustrialAugmenter(
-        #     masks_root_dir="datasets/masks",  # ضع هنا المسار الدقيق لمجلد masks لديك
-        #     img_size=self.config.img_size,           # 224 أو 256 أو حسب إعداداتك
-        #     p_anomaly=0.5,                   # احتمال حقن عيب في الصورة
-        #     p_blur=0.3,                      # احتمال اهتزاز حزام ماكينة النسيج
-        #     p_illum=0.4                      # احتمال تغير الظلال والإضاءة
-        # ).to(device)
-        
         self.augmenter = AnomalyTransplanter(
             anomaly_root_dir="datasets/anomaly_generation_datasets/images",
             target = "carpet",
@@ -376,65 +234,6 @@ class EEMFNet(nn.Module):
             p_illum=1.0     
         ).to(device)
         
-        # mit_dims = (64, 128, 320, 512)
-        # self.trans_backbone = MiT(channels=3, dims=mit_dims, n_heads=(1, 2, 5, 8),
-        #                           expansion=(8, 8, 4, 4), reduction_ratio=(8, 4, 2, 1),
-        #                           n_layers=(2, 2, 2, 2))
-
-        # try:
-        #     logger.info("--> Attempting to download official MiT-B2 weights...")
-            
-        #     weight_urls = [
-        #         "https://download.openmmlab.com/mmsegmentation/v0.5/pretrain/segformer/mit_b2_20220624-66e8bf70.pth",
-        #         "https://huggingface.co/jishi/SegFormer-mit-b2-imagenet-1k/resolve/main/mit_b2.pth"
-        #     ]
-            
-        #     state_dict = None
-        #     for url in weight_urls:
-        #         try:
-        #             logger.info(f"Downloading from: {url}")
-        #             checkpoint = torch.hub.load_state_dict_from_url(url, map_location='cpu', progress=True)
-        #             state_dict = checkpoint.get('state_dict', checkpoint.get('model', checkpoint))
-        #             break 
-        #         except Exception as dl_err:
-        #             logger.warning(f"Failed to download from {url}. Trying next source...")
-        #             continue
-            
-        #     if state_dict is None:
-        #         raise RuntimeError("All weight servers failed or are unreachable.")
-
-        #     clean_state_dict = {}
-        #     for k, v in state_dict.items():
-        #         clean_key = k.replace('backbone.', '').replace('encoder.', '')
-        #         clean_state_dict[clean_key] = v
-
-        #     missing_keys, unexpected_keys = self.trans_backbone.load_state_dict(clean_state_dict, strict=False)
-        #     logger.info("--> SUCCESS: Pre-trained MiT-B2 weights successfully injected!")
-        #     if missing_keys:
-        #         logger.debug(f"Expected unmapped keys (e.g. classification head): {len(missing_keys)} keys.")
-
-        # except Exception as e:
-        #     logger.warning(f"--> Could not inject pre-trained weights: {e}. Model will train from scratch.")
-
-        # for p in self.trans_backbone.parameters():
-        #     p.requires_grad = True
-
-        # self.fusion_blocks = nn.ModuleList([
-        #     DoubleConv(mit_dims[0] + cnn_channels[1], cnn_channels[1]), 
-        #     DoubleConv(mit_dims[1] + cnn_channels[2], cnn_channels[2]),  
-        #     DoubleConv(mit_dims[2] + cnn_channels[3], cnn_channels[3]),  
-        #     DoubleConv(mit_dims[3] + cnn_channels[4], cnn_channels[4]),  
-        #     DoubleConv(cnn_channels[4], mit_dims[3])                 
-        # ])
-
-        # self.upsampling = nn.ModuleList([
-        #     nn.Sequential(DoubleConv(mit_dims[0], 32), nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True)),
-        #     nn.Sequential(DoubleConv(mit_dims[1], 32), nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True)),
-        #     nn.Sequential(DoubleConv(mit_dims[2], 32), nn.Upsample(scale_factor=16, mode='bilinear', align_corners=True)),
-        #     nn.Sequential(DoubleConv(mit_dims[3], 32), nn.Upsample(scale_factor=32, mode='bilinear', align_corners=True)),
-        #     nn.Sequential(DoubleConv(mit_dims[3], 32), nn.Upsample(scale_factor=32, mode='bilinear', align_corners=True))
-        # ])
-
         self.base_dim = 48 # 64
         self.target_channels = [self.base_dim * (2 ** i) for i in range(len(cnn_channels))]
 
@@ -458,16 +257,9 @@ class EEMFNet(nn.Module):
 
         input_size = x.shape[2:]
         cnn_feats = self.cnn_backbone(x)
-        # trans_feats = self.trans_backbone(x)
-        # hybrid_raw_features = [cnn_feats[0]]  
-        # for i in range(4):
-        #     fused = torch.cat((trans_feats[i], cnn_feats[i+1]), dim=1)
-        #     reduced = self.fusion_blocks[i](fused)
-        #     hybrid_raw_features.append(reduced)
-
+        
         features = []
         for i, (proj, feat) in enumerate(zip(self.projections, cnn_feats)):
-        # for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
             if cnn_feats[0].shape[1] == cnn_feats[0].shape[2] and cnn_feats[1].shape[1] == cnn_feats[1].shape[2]:
                 feat = feat.permute(0, 3, 1, 2).contiguous()
 
@@ -547,6 +339,10 @@ class EEMFNet(nn.Module):
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_training_steps}", leave=False)
 
             for raw_images, _, _,_ in pbar:
+                
+                if raw_images.shape[-1] == 3 or raw_images.shape[-1] == 1:
+                    raw_images = raw_images.permute(0, 3, 1, 2).contiguous()
+
                 # end = time.time()
                 # images, masks, targets = images.to(self.device), masks.to(self.device), targets.to(self.device)
                 raw_images = raw_images.to(self.device, non_blocking=True)
