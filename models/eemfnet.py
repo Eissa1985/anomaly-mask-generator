@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from losses import CompositeLoss, FocalLoss, SpectralLoss
+import torchvision.transforms as transforms
+
 import torch.optim as optim
 from tqdm import tqdm
 import time
