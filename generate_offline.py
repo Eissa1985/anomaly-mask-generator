@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 # ⚙️ إعدادات التوليد (يمكنك تعديلها)
 # ==========================================
 NUM_MASKS_PER_TYPE = 1000            # عدد الأقنعة المراد توليدها لكل نوع (الإجمالي سيكون 3000)
-BASE_OUTPUT_DIR = "dataset/masks"    # المجلد الرئيسي
+BASE_OUTPUT_DIR = "datasets/masks"    # المجلد الرئيسي
 IMG_HEIGHT = 224                     # ارتفاع القناع
 IMG_WIDTH = 224                      # عرض القناع
 NUM_WORKERS = os.cpu_count()         # استخدام جميع أنوية المعالج
