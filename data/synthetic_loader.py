@@ -269,11 +269,18 @@ class EEMFNetDataset(Dataset):
         #         # self.anomaly_switch = False
         #     else:
         #         self.anomaly_switch = True
-        if not self.is_train:
+        if self.is_train:
+            img_tensor = self.transform_mask(img.copy())
+            if isinstance(mask, np.ndarray):
+                mask = (mask > 0.5).astype(np.float32) 
+            mask = self.transform_mask(mask).squeeze()
+
+        else:
+
             img_tensor = self.transform_img(img.copy())
             if isinstance(mask, np.ndarray):
                 mask = (mask > 0.5).astype(np.float32) 
-                mask = self.transform_mask(mask).squeeze()
+            mask = self.transform_mask(mask).squeeze()
 
         return img_tensor, mask, target, file_path
 
