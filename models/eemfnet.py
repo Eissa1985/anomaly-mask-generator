@@ -77,9 +77,9 @@ class IndustrialAugmenter(nn.Module):
         self.p_blur = p_blur
         self.p_illum = p_illum
 
-        # تسجيل قيم التقييس كـ Buffers لتعمل على كارت الشاشة (GPU) تلقائياً
-        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
-        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+        # # تسجيل قيم التقييس كـ Buffers لتعمل على كارت الشاشة (GPU) تلقائياً
+        # self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        # self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
         self.mask_paths = []
         for sub_dir in ["freeform", "perlin", "scratch"]:
@@ -154,10 +154,10 @@ class IndustrialAugmenter(nn.Module):
         batch_size = images.shape[0]
         device = images.device
         
-        # --- الإصلاح الجذري 1: فك التقييس (De-normalization) ---
-        # إرجاع الصورة من النطاق [-2.1, 2.6] إلى النطاق اللوني الحقيقي [0.0, 1.0]
-        images = (images * self.std) + self.mean
-        images = images.clamp(0.0, 1.0)
+        # # --- الإصلاح الجذري 1: فك التقييس (De-normalization) ---
+        # # إرجاع الصورة من النطاق [-2.1, 2.6] إلى النطاق اللوني الحقيقي [0.0, 1.0]
+        # images = (images * self.std) + self.mean
+        # images = images.clamp(0.0, 1.0)
         
         images = self._apply_illumination_gradient(images)
         images = self._apply_motion_blur(images)
