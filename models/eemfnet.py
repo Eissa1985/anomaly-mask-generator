@@ -39,37 +39,6 @@ logger = logging.getLogger(__name__)
 if not hasattr(np, 'trapz'):
     np.trapz = np.trapezoid
 
-class EMA:
-    """
-    ممتص الصدمات الرياضي: يحافظ على استقرار الأوزان ويمنع التذبذب العنيف في النتائج
-    """
-    def __init__(self, model, decay=0.995):
-        self.model = model
-        self.decay = decay
-        self.shadow = {}
-        self.backup = {}
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone().detach()
-
-    def update(self):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = self.decay * self.shadow[name] + (1.0 - self.decay) * param.data.detach()
-
-    def apply_shadow(self):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.backup[name] = param.data
-                param.data = self.shadow[name]
-
-    def restore(self):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                param.data = self.backup[name]
-        self.backup = {}
-
-
 class IndustrialAugmenter(nn.Module):
     def __init__(self, masks_root_dir, img_size=224, p_anomaly=0.5, p_blur=0.3, p_illum=0.4):
         super().__init__()
@@ -369,7 +338,7 @@ class EEMFNet(nn.Module):
         cnn_channels = self.cnn_backbone.feature_info.channels()
         
         # self.augmenter = IndustrialAugmenter(
-        #     masks_root_dir="dataset/masks",  # ضع هنا المسار الدقيق لمجلد masks لديك
+        #     masks_root_dir="datasets/masks",  # ضع هنا المسار الدقيق لمجلد masks لديك
         #     img_size=self.config.img_size,           # 224 أو 256 أو حسب إعداداتك
         #     p_anomaly=0.5,                   # احتمال حقن عيب في الصورة
         #     p_blur=0.3,                      # احتمال اهتزاز حزام ماكينة النسيج
@@ -377,7 +346,7 @@ class EEMFNet(nn.Module):
         # ).to(device)
         
         self.augmenter = AnomalyTransplanter(
-            anomaly_root_dir="dataset/anomaly_generation_datasets/images",
+            anomaly_root_dir="datasets/anomaly_generation_datasets/images",
             target = "carpet",
             img_size=224, 
             p_anomaly=0.5,  # 1.0 لضمان ظهور الشذوذ في كل صور الباتش للتجربة
@@ -543,7 +512,6 @@ class EEMFNet(nn.Module):
         logger.info(f"--> Starting Training for {num_training_steps} epochs...")
         train_mode = True
         epoch = 0
-        ema = EMA(self, decay=0.995)
         
         # for epoch in range(num_training_steps):
         while train_mode:  
@@ -587,8 +555,6 @@ class EEMFNet(nn.Module):
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 optimizer.step()
 
-                ema.update()
-                
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': loss.item()})
 
@@ -603,13 +569,7 @@ class EEMFNet(nn.Module):
             
             if (test_loader and ((epoch+1) % self.config.val_interval == 0)) or (epoch==0):
                 logger.info(f"\n[Epoch {epoch+1}] Validating...")
-
-                ema.apply_shadow()
-
                 eval_metrics, fps, optimal_threshold = self.predict(test_loader)
-
-                ema.restore()
-
                 log_payload.update({
                     "val/img_auc": eval_metrics['AUROC-image'],
                     "val/img_AP": eval_metrics['AP-image'],
@@ -654,13 +614,9 @@ class EEMFNet(nn.Module):
 
                         json.dump(state, open(os.path.join(save_dir, 'best_score.json'),'w'), indent='\t')
 
-                        ema.apply_shadow()
-                        
                         state_dict_cpu = {k: v.cpu() for k, v in self.state_dict().items()}
                         torch.save(state_dict_cpu, save_path)
 
-                        ema.restore()
-                        
                         logger.info(f"Epoch {epoch+1}:Img-AUC: {eval_metrics['AUROC-image']:.4f} | Px-AUC: {eval_metrics['AUROC-pixel']:.4f} | PRO: {eval_metrics['AUPRO-pixel']:.4f} | F1-Score: {eval_metrics['F1-pixel']:.4f} | Optimal-Threshold: {optimal_threshold:.4f} | inference speed: {fps:.4f} s")
                         logger.info(f"Epoch {epoch+1}: finished. Avg Loss: {avg_loss:.6f}")
                         logger.info(f"   >> New Best Model Saved!")
