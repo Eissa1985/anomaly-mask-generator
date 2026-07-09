@@ -5,36 +5,25 @@ from .coordatt import CoordAtt
 
 # (SA Code remains the same)
 class SA(nn.Module):
-    def __init__(self, in_channel, norm_layer=nn.BatchNorm2d):
+    def __init__(self, in_channel):
         super(SA, self).__init__()
-        self.in_channel = in_channel
-        self.conv1 = nn.Conv2d(in_channel, in_channel, kernel_size=3, stride=1, padding=1)
-        self.bn1 = norm_layer(in_channel)
-        self.act1 = nn.ReLU(inplace=True)
-        self.attn = CoordAtt(in_channel, in_channel)
-        self.conv2 = nn.Conv2d(in_channel, in_channel, kernel_size=3, stride=1, padding=1)
-        self.bn2 = norm_layer(in_channel)
-        self.act2 = nn.ReLU(inplace=True)
-        self.conv3 = nn.Conv2d(in_channel, 2*in_channel, kernel_size=3, stride=1, padding=1)
-        self.bn3 = norm_layer(2*in_channel)
-        self.act3 = nn.ReLU(inplace=True)
 
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.GELU()
+        )
+        self.attn = CoordAtt(in_channels, in_channels)
+        
     def forward(self, x, use_attn=True):
-        x_conv = self.conv1(x)
-        x_conv = self.bn1(x_conv)
-        x_conv = self.act1(x_conv)        
-
+        feat = self.conv(x)
         if use_attn:
-            x_att = self.attn(x)
-            out1 = x_conv * x_att
+            attn_mask = self.attn(feat)
+            out = feat * attn_mask
         else:
-            out1 = x_conv 
-        out2 = self.act2(self.bn2(self.conv2(out1)))
-        out3 = self.bn3(self.conv3(out2))
-        w, b = out3[:, :self.in_channel, :, :], out3[:, self.in_channel:, :, :]
-        out3 = self.act3(w * out2 + b)
-        return out3
-
+            out = feat 
+        return x + out
+        
 # (LearnableEdgeDetection Code remains the same)
 # class LearnableEdgeDetection(nn.Module):
 #     def __init__(self, input_channels, output_channels=1):
