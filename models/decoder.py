@@ -61,12 +61,20 @@ class Decoder(nn.Module):
             self.extra_db = None
             head_in = final_ch
 
+        # --- التعديلات المطلوبة تبدأ هنا ---
+        # استخدام GroupNorm و GELU للسماح بتباين أعلى وتجنب إخماد التدرج
         self.final_out = nn.Sequential(
             nn.Conv2d(head_in, 48, kernel_size=3, padding=1),
-            norm_layer(48),
-            nn.ReLU(inplace=True),
+            nn.GroupNorm(num_groups=8, num_channels=48), 
+            nn.GELU(),
             nn.Conv2d(48, 2, kernel_size=3, padding=1),
         )
+
+        # تهيئة أوزان الطبقة الأخيرة لتوسيع نطاق الـ Logits وتجنب النقطة الميتة
+        nn.init.normal_(self.final_out[-1].weight, mean=0.0, std=0.05)
+        if self.final_out[-1].bias is not None:
+            nn.init.constant_(self.final_out[-1].bias, 0.0)
+        # --- نهاية التعديلات ---
 
     def forward(self, encoder_output, concat_features):
         x = encoder_output
@@ -83,7 +91,5 @@ class Decoder(nn.Module):
             x = self.extra_db(x)
 
         x_mask = self.final_out(x)
-
-       
 
         return x_mask
