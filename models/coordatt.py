@@ -46,4 +46,4 @@ class CoordAtt(nn.Module):
         a_h = self.conv_h(x_h).sigmoid()
         a_w = self.conv_w(x_w).sigmoid()
         out = a_w * a_h
-        return out
+        return x * out
