@@ -259,10 +259,7 @@ class EEMFNet(nn.Module):
         cnn_feats = self.cnn_backbone(x)
         
         features = []
-        for i, (proj, feat) in enumerate(zip(self.projections, cnn_feats)):
-            if cnn_feats[0].shape[1] == cnn_feats[0].shape[2] and cnn_feats[1].shape[1] == cnn_feats[1].shape[2]:
-                feat = feat.permute(0, 3, 1, 2).contiguous()
-
+        for proj, feat in zip(self.projections, cnn_feats):
             features.append(proj(feat))
         f_in = features[0]
         f_out = features[-1]
@@ -358,15 +355,15 @@ class EEMFNet(nn.Module):
                 outputs = self(images)
 
                 loss_f = focal_criterion(outputs, masks)
-                # outputs = F.softmax(outputs, dim=1)
+                outputs = F.softmax(outputs, dim=1)
 
                 if isinstance(outputs, (list, tuple)): outputs = outputs[0]
-
-                masks = masks.float()
-                loss_c = pc_criterion(outputs[:, 1, :, :], masks)
-                # loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
-                loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
-                # loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
+            
+                masks = masks.unsqueeze(1).float() if masks.dim() == 3 else masks.float()
+                # loss_c = pc_criterion(outputs[:, 1, :, :], masks)
+                loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
+                # loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
+                loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
                 loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
 
                 loss.backward()
