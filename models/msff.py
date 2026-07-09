@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from coordatt import CoordAtt # تأكد من وجود ملف coordatt.py
+from .coordatt import CoordAtt # تأكد من وجود ملف coordatt.py
 
 # 1. بلوك الانتباه القياسي (الأصح والأكثر استقراراً)
 class StandardCoordBlock(nn.Module):
