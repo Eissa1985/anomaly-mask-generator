@@ -290,7 +290,7 @@ class EEMFNet(nn.Module):
                 max_lr = self.config.learning_rate,
                 min_lr = self.config.min_lr,
                 gamma= 1.0,
-                warmup_steps   = int(total_steps * 0.1), #int(num_training_steps * self.config.warmup_ratio)
+                warmup_steps   = int(num_training_steps * self.config.warmup_ratio)
                 )
 
         focal_criterion = FocalLoss(
@@ -347,8 +347,8 @@ class EEMFNet(nn.Module):
                 if isinstance(outputs, (list, tuple)): outputs = outputs[0]
             
                 masks = masks.unsqueeze(1).float() if masks.dim() == 3 else masks.float()
-                loss_c = pc_criterion(outputs[:, 1, :, :], masks)
-                # loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
+                # loss_c = pc_criterion(outputs[:, 1, :, :], masks)
+                loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
                 # loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
                 # loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
                 # loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
