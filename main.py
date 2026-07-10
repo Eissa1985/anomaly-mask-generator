@@ -119,7 +119,7 @@ def main():
 
         for sc in scenarios:
             use_synthetic = True
-            enable_msff = True #True
+            enable_msff = False #True
             cfg.use_synthetic = use_synthetic
             cfg.enable_msff = enable_msff
             # cfg.use_wandb = False
