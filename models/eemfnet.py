@@ -293,16 +293,20 @@ class EEMFNet(nn.Module):
                 warmup_steps   = int(num_training_steps * self.config.warmup_ratio)
                 )
 
-        focal_criterion = FocalLoss(
-            smooth= self.config.focal_smooth,
-            gamma = self.config.focal_gamma,
-            alpha = self.config.focal_alpha
-        )
-        pc_criterion = CompositeLoss()
+        # focal_criterion = FocalLoss(
+        #     smooth= self.config.focal_smooth,
+        #     gamma = self.config.focal_gamma,
+        #     alpha = self.config.focal_alpha
+        # )
+        # pc_criterion = CompositeLoss()
         # spectral_criterion = SpectralLoss(loss_weight=self.config.spectral_weight)
         
-        composite_weight = self.config.composite_weight
-        focal_weight = self.config.focal_weight
+        # composite_weight = self.config.composite_weight
+        # focal_weight = self.config.focal_weight
+
+        criterion = IoUOptimizedLoss(dice_weight=0.8, focal_weight=0.2).to(self.device)
+        
+
         best_score = -1.0
         best_AP = -1.0
         best_epoch = 0
@@ -341,19 +345,19 @@ class EEMFNet(nn.Module):
                 
                 outputs = self(images)
 
-                loss_f = focal_criterion(outputs, masks)
-                outputs = F.softmax(outputs, dim=1)
+                # loss_f = focal_criterion(outputs, masks)
+                # outputs = F.softmax(outputs, dim=1)
+                # if isinstance(outputs, (list, tuple)): outputs = outputs[0]
+                # masks = masks.unsqueeze(1).float() if masks.dim() == 3 else masks.float()
+                # # loss_c = pc_criterion(outputs[:, 1, :, :], masks)
+                # loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
+                # # loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
+                # # loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
+                # # loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
+                # loss =(composite_weight * loss_c) + (focal_weight * loss_f)
 
-                if isinstance(outputs, (list, tuple)): outputs = outputs[0]
-            
-                masks = masks.unsqueeze(1).float() if masks.dim() == 3 else masks.float()
-                # loss_c = pc_criterion(outputs[:, 1, :, :], masks)
-                loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
-                # loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
-                # loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
-                # loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
-                loss =(composite_weight * loss_c) + (focal_weight * loss_f)
-
+                loss = criterion(outputs, masks)
+                
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 optimizer.step()
