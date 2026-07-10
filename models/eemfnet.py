@@ -44,25 +44,12 @@ class ChannelProjector(nn.Module):
         super(ChannelProjector, self).__init__()
         self.projector = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
-            # استخدام GroupNorm بدلاً من BatchNorm لاستقرار التدرجات مع الباتشات الصغيرة
-            nn.GroupNorm(num_groups=8, num_channels=out_channels), 
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
 
     def forward(self, x):
         return self.projector(x)
-        
-# class ChannelProjector(nn.Module):
-#     def __init__(self, in_channels, out_channels):
-#         super(ChannelProjector, self).__init__()
-#         self.projector = nn.Sequential(
-#             nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
-#             nn.BatchNorm2d(out_channels),
-#             nn.ReLU(inplace=True)
-#         )
-
-#     def forward(self, x):
-#         return self.projector(x)
 
 class AnomalyTransplanter(nn.Module):
     def __init__(self, anomaly_root_dir, target, img_size=224, p_anomaly=0.5, p_blur=0.3, p_illum=0.4):
@@ -303,7 +290,7 @@ class EEMFNet(nn.Module):
                 max_lr = self.config.learning_rate,
                 min_lr = self.config.min_lr,
                 gamma= 1.0,
-                warmup_steps   = int(num_training_steps * self.config.warmup_ratio)
+                warmup_steps   = int(total_steps * 0.1), #int(num_training_steps * self.config.warmup_ratio)
                 )
 
         focal_criterion = FocalLoss(
@@ -312,7 +299,7 @@ class EEMFNet(nn.Module):
             alpha = self.config.focal_alpha
         )
         pc_criterion = CompositeLoss()
-        spectral_criterion = SpectralLoss(loss_weight=self.config.spectral_weight)
+        # spectral_criterion = SpectralLoss(loss_weight=self.config.spectral_weight)
         
         composite_weight = self.config.composite_weight
         focal_weight = self.config.focal_weight
@@ -330,7 +317,7 @@ class EEMFNet(nn.Module):
                 train_loader.dataset.set_epoch(epoch)
             # logger.info(f"Epoch {epoch}: Difficulty Level {train_loader.dataset.difficulty_level:.2f}")    
             self.train() 
-            # self.cnn_backbone.eval()
+            self.cnn_backbone.eval()
             # self.cnn_backbone.layer4.train()
             total_loss = 0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_training_steps}", leave=False)
@@ -350,7 +337,7 @@ class EEMFNet(nn.Module):
                 if masks.dim() == 4:
                     masks = masks.squeeze(1)
 
-                optimizer.zero_grad(set_to_none=True)
+                # optimizer.zero_grad(set_to_none=True)
                 
                 outputs = self(images)
 
@@ -360,15 +347,17 @@ class EEMFNet(nn.Module):
                 if isinstance(outputs, (list, tuple)): outputs = outputs[0]
             
                 masks = masks.unsqueeze(1).float() if masks.dim() == 3 else masks.float()
-                # loss_c = pc_criterion(outputs[:, 1, :, :], masks)
-                loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
+                loss_c = pc_criterion(outputs[:, 1, :, :], masks)
+                # loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
                 # loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
-                loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
-                loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
+                # loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
+                # loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
+                loss =(composite_weight * loss_c) + (focal_weight * loss_f)
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 optimizer.step()
+                optimizer.zero_grad()
 
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': loss.item()})
