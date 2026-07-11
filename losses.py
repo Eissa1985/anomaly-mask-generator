@@ -3,52 +3,35 @@ import segmentation_models_pytorch.losses as losses
 import torch
 import torch.nn.functional as F
 
-class DiceLoss(nn.Module):
-    """
-    دالة خسارة Dice: هي المعادل الرياضي القابل للاشتقاق لمقياس IoU.
-    كلما قلت هذه الخسارة، زادت دقة تطابق حواف القناع المتوقع مع الحقيقي.
-    """
-    def __init__(self, smooth=1.0, eps=1e-7, log_loss=True):
-        super(DiceLoss, self).__init__()
-        self.smooth = smooth
-        self.eps = eps
-        self.log_loss = log_loss
+# class DiceLoss(nn.Module):
+#     """
+#     دالة خسارة Dice: هي المعادل الرياضي القابل للاشتقاق لمقياس IoU.
+#     كلما قلت هذه الخسارة، زادت دقة تطابق حواف القناع المتوقع مع الحقيقي.
+#     """
+#     def __init__(self, smooth=1.0, eps=1e-7, log_loss=True):
+#         super(DiceLoss, self).__init__()
+#         self.smooth = smooth
+#         self.eps = eps
+#         self.log_loss = log_loss
 
-    def forward(self, inputs, targets):
-        # inputs: احتمالات من 0 إلى 1 (بعد Softmax)
-        # targets: قناع الحقيقة (0 أو 1)
+#     def forward(self, inputs, targets):
+#         # inputs: احتمالات من 0 إلى 1 (بعد Softmax)
+#         # targets: قناع الحقيقة (0 أو 1)
         
-        # تسطيح المصفوفات لتسهيل حساب التقاطع والاتحاد
-        inputs = inputs.contiguous().view(-1)
-        targets = targets.contiguous().view(-1)
+#         # تسطيح المصفوفات لتسهيل حساب التقاطع والاتحاد
+#         inputs = inputs.contiguous().view(-1)
+#         targets = targets.contiguous().view(-1)
         
-        intersection = (inputs * targets).sum()
+#         intersection = (inputs * targets).sum()
         
-        # الفصل بين smooth (لتحسين التدرج) و eps (لمنع القسمة على صفر)
-        dice = (2. * intersection + self.smooth) / (inputs.sum() + targets.sum() + self.smooth).clamp_min(self.eps)
+#         # الفصل بين smooth (لتحسين التدرج) و eps (لمنع القسمة على صفر)
+#         dice = (2. * intersection + self.smooth) / (inputs.sum() + targets.sum() + self.smooth).clamp_min(self.eps)
         
-        # تطبيق Log-Dice (مستوحى من مكتبة SMP) لدفع التدرجات بقوة أكبر
-        if self.log_loss:
-            return -torch.log(dice.clamp_min(self.eps))
+#         # تطبيق Log-Dice (مستوحى من مكتبة SMP) لدفع التدرجات بقوة أكبر
+#         if self.log_loss:
+#             return -torch.log(dice.clamp_min(self.eps))
             
-        return 1 - dice
-
-class FocalLoss(nn.Module):
-    """
-    دالة خسارة Focal: تركز على البكسلات الصعبة (التي يخطئ النموذج فيها)
-    وتتجاهل بكسلات الخلفية السهلة لحل مشكلة عدم التوازن.
-    """
-    def __init__(self, alpha=0.25, gamma=2.0):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-
-    def forward(self, inputs, targets):
-        # استخدام BCE كـ Base Loss
-        bce_loss = F.binary_cross_entropy(inputs, targets, reduction='none')
-        pt = torch.exp(-bce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
-        return focal_loss.mean()
+#         return 1 - dice
 
 class IoUOptimizedLoss(nn.Module):
     """
@@ -60,8 +43,10 @@ class IoUOptimizedLoss(nn.Module):
         self.dice_weight = dice_weight
         self.focal_weight = focal_weight
         
-        self.dice_loss = DiceLoss()
-        self.focal_loss = FocalLoss()
+        # self.dice_loss = DiceLoss()
+        self.focal_loss = FocalLoss(smooth=1e-4, gamma=0)
+        self.dice_loss = losses.DiceLoss(mode='binary')
+        self.bce_loss = nn.BCEWithLogitsLoss()
 
     def forward(self, logits, targets):
         """
@@ -70,7 +55,7 @@ class IoUOptimizedLoss(nn.Module):
         """
         # 1. تحويل الخرج الخام (Logits) إلى احتمالات (Probabilities)
         # استخدام log_softmax().exp() بدلاً من softmax() للاستقرار العددي (من مكتبة SMP)
-        probs = F.log_softmax(logits, dim=1).exp()[:, 1:2, :, :]
+        probs = F.softmax(logits, dim=1)[:, 1:2, :, :]
         
         # 2. التأكد من تطابق أبعاد الأهداف لتجنب أخطاء الـ Broadcasting
         if targets.dim() == 3:
@@ -78,15 +63,16 @@ class IoUOptimizedLoss(nn.Module):
         targets = targets.float()
 
         # 3. حساب الخسائر المنفصلة
+        bce_val = self.bce_loss(probs, targets)
         dice_val = self.dice_loss(probs, targets)
-        focal_val = self.focal_loss(probs, targets)
+        focal_val = self.focal_loss(logits, targets)
         
         # 4. الدمج بالأوزان المحددة لرفع الـ IoU
-        total_loss = (self.dice_weight * dice_val) + (self.focal_weight * focal_val)
+        total_loss = (0.6 * (0.5 * dice_val + 0.5 * bce_val)) + (0.4 * focal_val)
         
         return total_loss
         
-class FocalLoss_old(nn.Module):
+class FocalLoss(nn.Module):
 
     def __init__(self, smooth=1e-5, gamma=0, alpha=None, size_average=True):
         super(FocalLoss, self).__init__()
