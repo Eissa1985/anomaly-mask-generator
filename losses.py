@@ -3,6 +3,53 @@ import segmentation_models_pytorch.losses as losses
 import torch
 import torch.nn.functional as F
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        # inputs يجب أن تكون (Logits) قبل الـ Sigmoid/Softmax
+        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pt = torch.exp(-bce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+        return focal_loss.mean()
+
+class DiceLoss(nn.Module):
+    def __init__(self, smooth=1.0):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, inputs, targets):
+        # تطبيق Sigmoid للحصول على احتمالات بين 0 و 1
+        inputs = torch.sigmoid(inputs)
+        
+        # تسطيح المصفوفات (Flatten)
+        inputs = inputs.view(-1)
+        targets = targets.view(-1)
+        
+        intersection = (inputs * targets).sum()
+        dice = (2. * intersection + self.smooth) / (inputs.sum() + targets.sum() + self.smooth)
+        return 1 - dice
+
+class EEMFNetLoss(nn.Module):
+    def __init__(self, focal_weight=0.5, dice_weight=0.5):
+        super(EEMFNetLoss, self).__init__()
+        self.focal_weight = focal_weight
+        self.dice_weight = dice_weight
+        self.focal = FocalLoss(gamma=2.0)
+        self.dice = DiceLoss()
+
+    def forward(self, preds, masks):
+        # preds: مخرجات الموديل (Logits)
+        # masks: الماسك الحقيقي (Ground Truth)
+        loss_focal = self.focal(preds, masks)
+        loss_dice = self.dice(preds, masks)
+        
+        total_loss = (self.focal_weight * loss_focal) + (self.dice_weight * loss_dice)
+        return total_loss
+
 # class DiceLoss(nn.Module):
 #     """
 #     دالة خسارة Dice: هي المعادل الرياضي القابل للاشتقاق لمقياس IoU.
