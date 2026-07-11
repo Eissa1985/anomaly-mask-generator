@@ -305,7 +305,7 @@ class EEMFNet(nn.Module):
         # composite_weight = self.config.composite_weight
         # focal_weight = self.config.focal_weight
 
-        criterion = IoUOptimizedLoss(dice_weight=0.8, focal_weight=0.2).to(self.device)
+        criterion = IoUOptimizedLoss(dice_weight=0.6, focal_weight=0.4).to(self.device)
         
 
         best_score = -1.0
