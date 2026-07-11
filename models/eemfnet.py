@@ -1,5 +1,5 @@
 from .decoder import Decoder
-from .msff import MSFF
+# from .msff import MSFF
 from utils.metrics import AnomalyEvaluator
 import torch
 import torch.nn as nn
@@ -40,18 +40,62 @@ logger = logging.getLogger(__name__)
 if not hasattr(np, 'trapz'):
     np.trapz = np.trapezoid
 
-class ChannelProjector(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(ChannelProjector, self).__init__()
-        self.projector = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
+# class ChannelProjector(nn.Module):
+#     def __init__(self, in_channels, out_channels):
+#         super(ChannelProjector, self).__init__()
+#         self.projector = nn.Sequential(
+#             nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+#             nn.BatchNorm2d(out_channels),
+#             nn.ReLU(inplace=True)
+#         )
+
+#     def forward(self, x):
+#         return self.projector(x)
+
+class AttentionalFeatureFusion(nn.Module):
+    """
+    الدمج الانتباهي للخصائص (AFF):
+    يعتمد على مبدأ التركيبة المحدبة (Convex Combination) لضمان عدم ضياع أي ميزة.
+    إذا كان وزن CNN هو w، فإن وزن Transformer يكون (1 - w).
+    هذا يمنع اختناق التدرجات تماماً ويحقق استقراراً عالياً.
+    """
+    def __init__(self, cnn_dim, trans_dim):
+        super(AttentionalFeatureFusion, self).__init__()
+        # توحيد الأبعاد
+        self.trans_proj = nn.Sequential(
+            nn.Conv2d(trans_dim, cnn_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(cnn_dim),
+            nn.GELU()
+        )
+        
+        # شبكة SE (Squeeze-and-Excitation) لاستخراج وزن الدمج
+        mid_dim = max(8, cnn_dim // 4)
+        self.context_weighting = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(cnn_dim, mid_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(mid_dim),
+            nn.GELU(),
+            nn.Conv2d(mid_dim, cnn_dim, kernel_size=1, bias=False),
+            nn.Sigmoid()
         )
 
-    def forward(self, x):
-        return self.projector(x)
-
+    def forward(self, cnn_x, trans_x):
+        if trans_x.shape[2:] != cnn_x.shape[2:]:
+            trans_x = F.interpolate(trans_x, size=cnn_x.shape[2:], mode='bilinear', align_corners=False)
+            
+        trans_p = self.trans_proj(trans_x)
+        
+        # 1. جمع مبدئي للخصائص لقراءة السياق المشترك
+        initial_fusion = cnn_x + trans_p
+        
+        # 2. توليد أوزان الانتباه w بناءً على السياق المشترك
+        w = self.context_weighting(initial_fusion)
+        
+        # 3. الدمج العكسي (Convex Combination): يضمن بقاء الطاقة الإجمالية ثابتة
+        out = (w * cnn_x) + ((1.0 - w) * trans_p)
+        
+        return out
+        
 class AnomalyTransplanter(nn.Module):
     def __init__(self, anomaly_root_dir, target, img_size=224, p_anomaly=0.5, p_blur=0.3, p_illum=0.4):
         """
@@ -226,6 +270,43 @@ class EEMFNet(nn.Module):
         self.trans_backbone = MiT(channels=3, dims=mit_dims, n_heads=(1, 2, 5, 8),
                                   expansion=(8, 8, 4, 4), reduction_ratio=(8, 4, 2, 1),
                                   n_layers=(2, 2, 2, 2))
+        
+        # (يفترض وجود كود تحميل الأوزان هنا كما في كودك الأصلي... تم تخطيه للاختصار)
+
+        # ⚠️ الحل العلمي: لا تقم بتجميد الـ Transformer بالكامل!
+        # نفتح آخر طبقتين (Block 3 & 4) للتعلم الدقيق لكي يتأقلم مع أنسجة السجاد
+        for name, param in self.trans_backbone.named_parameters():
+            if "block3" in name or "block4" in name or "norm3" in name or "norm4" in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
+        # --- ج. وحدات الدمج الهجين (Attentional Feature Fusion) بدلاً من CrossAttention ---
+        self.fusion_blocks = nn.ModuleList([
+            AttentionalFeatureFusion(cnn_dim=cnn_channels[1], trans_dim=mit_dims[0]),
+            AttentionalFeatureFusion(cnn_dim=cnn_channels[2], trans_dim=mit_dims[1]),
+            AttentionalFeatureFusion(cnn_dim=cnn_channels[3], trans_dim=mit_dims[2]),
+            AttentionalFeatureFusion(cnn_dim=cnn_channels[4], trans_dim=mit_dims[3])
+        ])
+
+        # (تم حذف self.upsampling لأنه كود ميت لا يُستخدم)
+
+        # --- د. تجهيز الأبعاد والمفكك ---
+        self.base_dim = 48
+        self.target_channels = [self.base_dim * (2 ** i) for i in range(len(cnn_channels))]
+
+        self.projections = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(src, tgt, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=8, num_channels=tgt),
+                nn.ReLU(inplace=True)
+            ) for src, tgt in zip(cnn_channels, self.target_channels)
+        ])
+        
+        mit_dims = (64, 128, 320, 512)
+        self.trans_backbone = MiT(channels=3, dims=mit_dims, n_heads=(1, 2, 5, 8),
+                                  expansion=(8, 8, 4, 4), reduction_ratio=(8, 4, 2, 1),
+                                  n_layers=(2, 2, 2, 2))
 
         try:
             logger.info("--> Attempting to download official MiT-B2 weights...")
@@ -262,38 +343,37 @@ class EEMFNet(nn.Module):
         except Exception as e:
             logger.warning(f"--> Could not inject pre-trained weights: {e}. Model will train from scratch.")
 
-        for p in self.trans_backbone.parameters():
-            p.requires_grad = False
+        # for p in self.trans_backbone.parameters():
+        #     p.requires_grad = False
+        for name, param in self.trans_backbone.named_parameters():
+            if "block3" in name or "block4" in name or "norm3" in name or "norm4" in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
 
+        # --- ج. وحدات الدمج الهجين (Attentional Feature Fusion) بدلاً من CrossAttention ---
         self.fusion_blocks = nn.ModuleList([
-            DoubleConv(mit_dims[0] + cnn_channels[1], cnn_channels[1]), 
-            DoubleConv(mit_dims[1] + cnn_channels[2], cnn_channels[2]),  
-            DoubleConv(mit_dims[2] + cnn_channels[3], cnn_channels[3]),  
-            DoubleConv(mit_dims[3] + cnn_channels[4], cnn_channels[4]),  
-            DoubleConv(cnn_channels[4], mit_dims[3])                 
+            AttentionalFeatureFusion(cnn_dim=cnn_channels[1], trans_dim=mit_dims[0]),
+            AttentionalFeatureFusion(cnn_dim=cnn_channels[2], trans_dim=mit_dims[1]),
+            AttentionalFeatureFusion(cnn_dim=cnn_channels[3], trans_dim=mit_dims[2]),
+            AttentionalFeatureFusion(cnn_dim=cnn_channels[4], trans_dim=mit_dims[3])
         ])
 
-        self.upsampling = nn.ModuleList([
-            nn.Sequential(DoubleConv(mit_dims[0], 32), nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True)),
-            nn.Sequential(DoubleConv(mit_dims[1], 32), nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True)),
-            nn.Sequential(DoubleConv(mit_dims[2], 32), nn.Upsample(scale_factor=16, mode='bilinear', align_corners=True)),
-            nn.Sequential(DoubleConv(mit_dims[3], 32), nn.Upsample(scale_factor=32, mode='bilinear', align_corners=True)),
-            nn.Sequential(DoubleConv(mit_dims[3], 32), nn.Upsample(scale_factor=32, mode='bilinear', align_corners=True))
-        ])
-        
-        self.base_dim = 48 # 64
+        # (تم حذف self.upsampling لأنه كود ميت لا يُستخدم)
+
+        # --- د. تجهيز الأبعاد والمفكك ---
+        self.base_dim = 48
         self.target_channels = [self.base_dim * (2 ** i) for i in range(len(cnn_channels))]
 
-        logger.info(f"Raw Channels: {cnn_channels}")
-        logger.info(f"Projected Target Channels: {self.target_channels}")
-
         self.projections = nn.ModuleList([
-            ChannelProjector(src, tgt)
-            for src, tgt in zip(cnn_channels, self.target_channels)
+            nn.Sequential(
+                nn.Conv2d(src, tgt, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=8, num_channels=tgt),
+                nn.ReLU(inplace=True)
+            ) for src, tgt in zip(cnn_channels, self.target_channels)
         ])
-
         # self.msff = MSFF(in_channels[1:-1]).to(self.device)
-        self.msff = MSFF(self.target_channels[1:-1]).to(self.device)
+        # self.msff = MSFF(self.target_channels[1:-1]).to(self.device)
         # self.decoder = Decoder(in_channels).to(self.device)
         self.decoder = Decoder(self.target_channels).to(self.device)
         self.evaluator = AnomalyEvaluator(pro_integration_limit=0.3)
@@ -306,31 +386,32 @@ class EEMFNet(nn.Module):
         cnn_feats = self.cnn_backbone(x)
 
         trans_feats = self.trans_backbone(x)
-        hybrid_raw_features = [cnn_feats[0]]  
+        hybrid_raw_features = [cnn_feats[0]]  # الطبقة الأولى تبقى CNN نقية
         for i in range(4):
-            fused = torch.cat((trans_feats[i], cnn_feats[i+1]), dim=1)
-            reduced = self.fusion_blocks[i](fused)
-            hybrid_raw_features.append(reduced)
+            # دمج مستقر عبر التركيبة المحدبة
+            fused = self.fusion_blocks[i](cnn_x=cnn_feats[i+1], trans_x=trans_feats[i])
+            hybrid_raw_features.append(fused)
         
+        # 3. توحيد القنوات (Projections)
         features = []
-        # for proj, feat in zip(self.projections, cnn_feats):
         for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
             features.append(proj(feat))
+        
         f_in = features[0]
         f_out = features[-1]
         f_ii = features[1:-1]
 
-        # 2. MSFF
-        enable_msff = getattr(self.config, 'enable_msff', True)
-        if enable_msff:
-            msff_outputs = self.msff(features=f_ii)
-        else:
-            msff_outputs = f_ii # تخطي عملية الدمج والـ Attention
+        # # 2. MSFF
+        # enable_msff = getattr(self.config, 'enable_msff', True)
+        # if enable_msff:
+        #     msff_outputs = self.msff(features=f_ii)
+        # else:
+        #     msff_outputs = f_ii # تخطي عملية الدمج والـ Attention
 
         # 3. Decoder
         outputs = self.decoder(
             encoder_output=f_out,
-            concat_features=[f_in] + msff_outputs
+            concat_features=[f_in] + f_ii
         )
 
         if outputs.shape[2:] != input_size:
