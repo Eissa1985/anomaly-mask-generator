@@ -471,7 +471,7 @@ class EEMFNet(nn.Module):
             # logger.info(f"Epoch {epoch}: Difficulty Level {train_loader.dataset.difficulty_level:.2f}")    
             self.train() 
             self.cnn_backbone.eval()
-            self.trans_backbone.eval()
+            # self.trans_backbone.eval()
             # self.cnn_backbone.layer4.train()
             total_loss = 0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_training_steps}", leave=False)
