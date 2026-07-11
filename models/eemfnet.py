@@ -221,6 +221,65 @@ class EEMFNet(nn.Module):
             p_blur=1.0,     
             p_illum=1.0     
         ).to(device)
+
+        mit_dims = (64, 128, 320, 512)
+        self.trans_backbone = MiT(channels=3, dims=mit_dims, n_heads=(1, 2, 5, 8),
+                                  expansion=(8, 8, 4, 4), reduction_ratio=(8, 4, 2, 1),
+                                  n_layers=(2, 2, 2, 2))
+
+        try:
+            logger.info("--> Attempting to download official MiT-B2 weights...")
+            
+            weight_urls = [
+                "https://download.openmmlab.com/mmsegmentation/v0.5/pretrain/segformer/mit_b2_20220624-66e8bf70.pth",
+                "https://huggingface.co/jishi/SegFormer-mit-b2-imagenet-1k/resolve/main/mit_b2.pth"
+            ]
+            
+            state_dict = None
+            for url in weight_urls:
+                try:
+                    logger.info(f"Downloading from: {url}")
+                    checkpoint = torch.hub.load_state_dict_from_url(url, map_location='cpu', progress=True)
+                    state_dict = checkpoint.get('state_dict', checkpoint.get('model', checkpoint))
+                    break 
+                except Exception as dl_err:
+                    logger.warning(f"Failed to download from {url}. Trying next source...")
+                    continue
+            
+            if state_dict is None:
+                raise RuntimeError("All weight servers failed or are unreachable.")
+
+            clean_state_dict = {}
+            for k, v in state_dict.items():
+                clean_key = k.replace('backbone.', '').replace('encoder.', '')
+                clean_state_dict[clean_key] = v
+
+            missing_keys, unexpected_keys = self.trans_backbone.load_state_dict(clean_state_dict, strict=False)
+            logger.info("--> SUCCESS: Pre-trained MiT-B2 weights successfully injected!")
+            if missing_keys:
+                logger.debug(f"Expected unmapped keys (e.g. classification head): {len(missing_keys)} keys.")
+
+        except Exception as e:
+            logger.warning(f"--> Could not inject pre-trained weights: {e}. Model will train from scratch.")
+
+        for p in self.trans_backbone.parameters():
+            p.requires_grad = False
+
+        self.fusion_blocks = nn.ModuleList([
+            DoubleConv(mit_dims[0] + cnn_channels[1], cnn_channels[1]), 
+            DoubleConv(mit_dims[1] + cnn_channels[2], cnn_channels[2]),  
+            DoubleConv(mit_dims[2] + cnn_channels[3], cnn_channels[3]),  
+            DoubleConv(mit_dims[3] + cnn_channels[4], cnn_channels[4]),  
+            DoubleConv(cnn_channels[4], mit_dims[3])                 
+        ])
+
+        self.upsampling = nn.ModuleList([
+            nn.Sequential(DoubleConv(mit_dims[0], 32), nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True)),
+            nn.Sequential(DoubleConv(mit_dims[1], 32), nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True)),
+            nn.Sequential(DoubleConv(mit_dims[2], 32), nn.Upsample(scale_factor=16, mode='bilinear', align_corners=True)),
+            nn.Sequential(DoubleConv(mit_dims[3], 32), nn.Upsample(scale_factor=32, mode='bilinear', align_corners=True)),
+            nn.Sequential(DoubleConv(mit_dims[3], 32), nn.Upsample(scale_factor=32, mode='bilinear', align_corners=True))
+        ])
         
         self.base_dim = 48 # 64
         self.target_channels = [self.base_dim * (2 ** i) for i in range(len(cnn_channels))]
@@ -245,9 +304,17 @@ class EEMFNet(nn.Module):
 
         input_size = x.shape[2:]
         cnn_feats = self.cnn_backbone(x)
+
+        trans_feats = self.trans_backbone(x)
+        hybrid_raw_features = [cnn_feats[0]]  
+        for i in range(4):
+            fused = torch.cat((trans_feats[i], cnn_feats[i+1]), dim=1)
+            reduced = self.fusion_blocks[i](fused)
+            hybrid_raw_features.append(reduced)
         
         features = []
-        for proj, feat in zip(self.projections, cnn_feats):
+        # for proj, feat in zip(self.projections, cnn_feats):
+        for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
             features.append(proj(feat))
         f_in = features[0]
         f_out = features[-1]
@@ -323,6 +390,7 @@ class EEMFNet(nn.Module):
             # logger.info(f"Epoch {epoch}: Difficulty Level {train_loader.dataset.difficulty_level:.2f}")    
             self.train() 
             self.cnn_backbone.eval()
+            self.trans_backbone.eval()
             # self.cnn_backbone.layer4.train()
             total_loss = 0
             pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_training_steps}", leave=False)
