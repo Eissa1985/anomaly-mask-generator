@@ -240,11 +240,57 @@ class AnomalyTransplanter(nn.Module):
             final_masks[idx, 0, place_h:place_h+c_h, place_w:place_w+c_w] = hard_mask
 
         return result_images, final_masks
-    
+
+    def _apply_motion_blur(self, x):
+        """
+        محاكاة اهتزاز وحركة خط الإنتاج السريعة (Anisotropic Motion Blur)
+        """
+        if torch.rand(1).item() > self.p_blur:
+            return x
+        
+        kernel_size = int(torch.randint(3, 9, (1,)).item()) | 1  # رقم فردي دائماً
+        kernel = torch.zeros((1, 1, kernel_size, kernel_size), device=x.device)
+        
+        if torch.rand(1).item() > 0.5:
+            kernel[0, 0, kernel_size // 2, :] = 1.0 / kernel_size  # حركة أفقية (سحب القماش)
+        else:
+            kernel[0, 0, :, kernel_size // 2] = 1.0 / kernel_size  # حركة رأسية
+            
+        kernel = kernel.repeat(x.shape[1], 1, 1, 1)
+        x_blurred = F.conv2d(x, kernel, padding=kernel_size//2, groups=x.shape[1])
+        return x_blurred
+
+    def _apply_illumination_gradient(self, x):
+        """
+        محاكاة الظلال وتغير الإضاءة على القماش على خط الإنتاج.
+        """
+        if torch.rand(1).item() > self.p_illum:
+            return x
+            
+        b, c, h, w = x.shape
+        y_grid, x_grid = torch.meshgrid(
+            torch.linspace(-1, 1, h, device=x.device),
+            torch.linspace(-1, 1, w, device=x.device),
+            indexing='ij'
+        )
+        
+        angle = torch.rand(1, device=x.device) * 2 * math.pi
+        gradient = (x_grid * torch.cos(angle) + y_grid * torch.sin(angle))
+        
+        gradient = 0.7 + 0.6 * ((gradient - gradient.min()) / (gradient.max() - gradient.min() + 1e-8))
+        gradient = gradient.unsqueeze(0).unsqueeze(0).expand_as(x)
+        
+        return torch.clamp(x * gradient, 0.0, 1.0)
+        
     def forward(self, images, anomaly_textures=None):
         batch_size = images.shape[0]
         device = images.device
         # print(images.shape)
+
+        # 1. تطبيق تأثيرات البيئة الصناعية (ظلال واهتزاز) على الصورة النظيفة أولاً
+        # images = self._apply_illumination_gradient(images)
+        # images = self._apply_motion_blur(images)
+        
         # 2. قناع اختيار الصور التي سيحقن بها عيوب
         inject_mask = (torch.rand(batch_size, device=device) < self.p_anomaly).float().view(batch_size, 1, 1, 1)
         
