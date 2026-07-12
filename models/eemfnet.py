@@ -12,6 +12,8 @@ import time
 import os
 import numpy as np
 import gc
+import torchvision
+import math
 
 import time
 import json
@@ -40,50 +42,7 @@ logger = logging.getLogger(__name__)
 if not hasattr(np, 'trapz'):
     np.trapz = np.trapezoid
 
-class ChannelAttention(nn.Module):
-    def __init__(self, in_channels, reduction_ratio=16):
-        super(ChannelAttention, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        
-        self.fc = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels // reduction_ratio, 1, bias=False),
-            nn.ReLU(),
-            nn.Conv2d(in_channels // reduction_ratio, in_channels, 1, bias=False)
-        )
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = self.fc(self.avg_pool(x))
-        max_out = self.fc(self.max_pool(x))
-        return self.sigmoid(avg_out + max_out)
-
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
-        padding = 3 if kernel_size == 7 else 1
-        
-        self.conv = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x_cat = torch.cat([avg_out, max_out], dim=1)
-        return self.sigmoid(self.conv(x_cat))
-
-class CBAM(nn.Module):
-    def __init__(self, in_channels, reduction_ratio=16, kernel_size=7):
-        super(CBAM, self).__init__()
-        self.channel_gate = ChannelAttention(in_channels, reduction_ratio)
-        self.spatial_gate = SpatialAttention(kernel_size)
-
-    def forward(self, x):
-        x_out = x * self.channel_gate(x)
-        x_out = x_out * self.spatial_gate(x_out)
-        return x_out
-        
+       
 # class ChannelProjector(nn.Module):
 #     def __init__(self, in_channels, out_channels):
 #         super(ChannelProjector, self).__init__()
@@ -96,50 +55,6 @@ class CBAM(nn.Module):
 #     def forward(self, x):
 #         return self.projector(x)
 
-class AttentionalFeatureFusion(nn.Module):
-    """
-    الدمج الانتباهي للخصائص (AFF):
-    يعتمد على مبدأ التركيبة المحدبة (Convex Combination) لضمان عدم ضياع أي ميزة.
-    إذا كان وزن CNN هو w، فإن وزن Transformer يكون (1 - w).
-    هذا يمنع اختناق التدرجات تماماً ويحقق استقراراً عالياً.
-    """
-    def __init__(self, cnn_dim, trans_dim):
-        super(AttentionalFeatureFusion, self).__init__()
-        # توحيد الأبعاد
-        self.trans_proj = nn.Sequential(
-            nn.Conv2d(trans_dim, cnn_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(cnn_dim),
-            nn.GELU()
-        )
-        
-        # شبكة SE (Squeeze-and-Excitation) لاستخراج وزن الدمج
-        mid_dim = max(8, cnn_dim // 4)
-        self.context_weighting = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(cnn_dim, mid_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(mid_dim),
-            nn.GELU(),
-            nn.Conv2d(mid_dim, cnn_dim, kernel_size=1, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, cnn_x, trans_x):
-        if trans_x.shape[2:] != cnn_x.shape[2:]:
-            trans_x = F.interpolate(trans_x, size=cnn_x.shape[2:], mode='bilinear', align_corners=False)
-            
-        trans_p = self.trans_proj(trans_x)
-        
-        # 1. جمع مبدئي للخصائص لقراءة السياق المشترك
-        initial_fusion = cnn_x + trans_p
-        
-        # 2. توليد أوزان الانتباه w بناءً على السياق المشترك
-        w = self.context_weighting(initial_fusion)
-        
-        # 3. الدمج العكسي (Convex Combination): يضمن بقاء الطاقة الإجمالية ثابتة
-        out = (w * cnn_x) + ((1.0 - w) * trans_p)
-        
-        return out
-        
 class AnomalyTransplanter(nn.Module):
     def __init__(self, anomaly_root_dir, target, img_size=224, p_anomaly=0.5, p_blur=0.3, p_illum=0.4):
         """
@@ -313,9 +228,202 @@ class AnomalyTransplanter(nn.Module):
         a_imgs = TF.normalize(a_imgs, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         
         return a_imgs, train_masks, targets
+###########################
+# ==========================================
+# 1. Dynamic/Deformable Convolution (DSConv)
+# ==========================================
+class DSConv(nn.Module):
+    """
+    تطبيق الـ DSConv. 
+    نستخدم DeformConv2d كبديل عملي متاح في PyTorch لمحاكاة 
+    الالتفاف الديناميكي القابل للتشوه للتكيف مع حواف السجاد.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
+        super(DSConv, self).__init__()
+        self.offset_conv = nn.Conv2d(
+            in_channels, 
+            2 * kernel_size * kernel_size, 
+            kernel_size=kernel_size, 
+            stride=stride, 
+            padding=padding, 
+            bias=False
+        )
+        self.deform_conv = torchvision.ops.DeformConv2d(
+            in_channels, 
+            out_channels, 
+            kernel_size=kernel_size, 
+            stride=stride, 
+            padding=padding, 
+            bias=False
+        )
+
+    def forward(self, x):
+        offsets = self.offset_conv(x)
+        return self.deform_conv(x, offsets)
+
+# ==========================================
+# 2. ResNet-50 Modified Bottleneck (D-Bottleneck)
+# ==========================================
+class DBottleneck(nn.Module):
+    """
+    نسخة معدلة من Bottleneck الخاص بـ ResNet-50.
+    يحتوي على 4 طبقات التفاف بدلاً من 3:
+    Input -> Conv1x1 -> Conv3x3 -> DSConv -> Conv1x1 -> Add
+    """
+    expansion = 4 # معامل التوسعة القياسي في ResNet-50
+
+    def __init__(self, in_channels, mid_channels, stride=1):
+        super(DBottleneck, self).__init__()
+        out_channels = mid_channels * self.expansion
+
+        self.conv1 = nn.Conv2d(in_channels, mid_channels, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(mid_channels)
+
+        # يتم تطبيق الـ Stride هنا لتقليل الأبعاد كما في ResNet القياسي
+        self.conv2 = nn.Conv2d(mid_channels, mid_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(mid_channels)
+
+        # إضافة DSConv كطبقة إضافية لاستخلاص الخصائص المعقدة
+        self.dsconv = DSConv(mid_channels, mid_channels, kernel_size=3, padding=1)
+        self.bn_ds = nn.BatchNorm2d(mid_channels)
+
+        self.conv3 = nn.Conv2d(mid_channels, out_channels, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(out_channels)
+
+        self.relu = nn.ReLU(inplace=True)
+
+        # مسار التخطي (Shortcut) لمطابقة الأبعاد
+        self.downsample = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+
+    def forward(self, x):
+        identity = self.downsample(x)
+
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.relu(self.bn2(self.conv2(out)))
+        out = self.relu(self.bn_ds(self.dsconv(out)))
+        out = self.bn3(self.conv3(out))
+
+        out += identity
+        return self.relu(out)
+
+# ==========================================
+# 3. ResNet-50 D-Encoder
+# ==========================================
+class ResNet50_D_Encoder(nn.Module):
+    """
+    بناء الـ Encoder اعتماداً على ResNet-50 ولكن بتوزيع البلوكات [3, 6, 9] 
+    كما هو مذكور في ورقة البحث بدلاً من [3, 4, 6, 3].
+    """
+    def __init__(self, in_channels=3):
+        super(ResNet50_D_Encoder, self).__init__()
         
+        # Stem (نفس بداية ResNet-50)
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        )
+
+        # Stages (معدلة لتصبح 3, 6, 9)
+        self.stage1 = self._make_layer(in_channels=64, mid_channels=64, num_blocks=3, stride=1)
+        self.stage2 = self._make_layer(in_channels=256, mid_channels=128, num_blocks=6, stride=2)
+        self.stage3 = self._make_layer(in_channels=512, mid_channels=256, num_blocks=9, stride=2)
+
+    def _make_layer(self, in_channels, mid_channels, num_blocks, stride):
+        layers = []
+        # البلوك الأول في المرحلة يطبق الـ Stride
+        layers.append(DBottleneck(in_channels, mid_channels, stride))
+        # باقي البلوكات تحافظ على نفس الأبعاد
+        out_channels = mid_channels * DBottleneck.expansion
+        for _ in range(1, num_blocks):
+            layers.append(DBottleneck(out_channels, mid_channels, 1))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.stem(x)
+        skip1 = self.stage1(x)     # Output: [B, 256, H/4, W/4]
+        skip2 = self.stage2(skip1) # Output: [B, 512, H/8, W/8]
+        skip3 = self.stage3(skip2) # Output: [B, 1024, H/16, W/16]
+        return skip1, skip2, skip3
+
+# ==========================================
+# 4. Embeddings & Transformer Modules
+# ==========================================
+class EmbeddingsModule(nn.Module):
+    def __init__(self, in_channels, hidden_size, img_size=224):
+        super(EmbeddingsModule, self).__init__()
+        self.conv2d = nn.Conv2d(in_channels, hidden_size, kernel_size=1, bias=False)
+        grid_size = img_size // 16
+        num_patches = grid_size * grid_size
+        self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches, hidden_size))
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        x = self.conv2d(x)
+        x = x.flatten(2).transpose(1, 2)
+        
+        # التكيف الديناميكي مع حجم الصورة
+        if self.position_embeddings.shape[1] != x.shape[1]:
+            pos_emb = self.position_embeddings.transpose(1, 2).view(1, -1, int(math.sqrt(self.position_embeddings.shape[1])), int(math.sqrt(self.position_embeddings.shape[1])))
+            pos_emb = F.interpolate(pos_emb, size=(H, W), mode='bilinear', align_corners=False)
+            pos_emb = pos_emb.view(1, -1, H * W).transpose(1, 2)
+            x = x + pos_emb
+        else:
+            x = x + self.position_embeddings
+            
+        x = self.dropout(x)
+        return x, H, W
+
+class TransformerBlock(nn.Module):
+    def __init__(self, hidden_size, num_heads, mlp_dim):
+        super(TransformerBlock, self).__init__()
+        self.norm1 = nn.LayerNorm(hidden_size)
+        self.msa = nn.MultiheadAttention(hidden_size, num_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(hidden_size)
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size, mlp_dim),
+            nn.GELU(),
+            nn.Linear(mlp_dim, hidden_size)
+        )
+
+    def forward(self, x):
+        x_norm = self.norm1(x)
+        attn_out, _ = self.msa(x_norm, x_norm, x_norm)
+        x = x + attn_out
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+# ==========================================
+# 5. Decoder Block Module
+# ==========================================
+class DecoderBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DecoderBlock, self).__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+##############################
+
 class EEMFNet(nn.Module):
-    def __init__(self, device='cpu', config=None):
+    # def __init__(self, device='cpu', config=None):
+    def __init__(self, device='cpu', config=None, in_channels=3, num_classes=2, img_size=224):
+
         super(EEMFNet, self).__init__()
         self.opts_list = {
             "adamw": optim.AdamW,
@@ -325,198 +433,268 @@ class EEMFNet(nn.Module):
 
         self.device = device
         self.config = config
-        backbone_name = config.backbone_name if config else "resnet18"
-        logger.info(f"--> Building Backbone: {backbone_name}")
 
-        try:
-            self.cnn_backbone = create_model(
-                backbone_name,
-                pretrained=True,
-                features_only=True
-            )
-            for p in self.cnn_backbone.parameters():
-                    p.requires_grad = False
-            # for name, param in self.cnn_backbone.named_parameters():
-            #     if "blocks.4" in name or "blocks.5" in name or "conv_head" in name:
-            #         param.requires_grad = True
-            #     else:
-            #         param.requires_grad = False
+        ##########################
+        # --- 1. ResNet-50 based D-Encoder ---
+        self.encoder = ResNet50_D_Encoder(in_channels)
 
-        except RuntimeError as e:
-            logger.warning(f"Error.... Default indices failed for {backbone_name}, trying default behavior. c: {e}")
-
-        cnn_channels = self.cnn_backbone.feature_info.channels()
-        
-        self.augmenter = AnomalyTransplanter(
-            anomaly_root_dir="datasets/anomaly_generation_datasets/images",
-            target = "carpet",
-            img_size=224, 
-            p_anomaly=0.5,  # 1.0 لضمان ظهور الشذوذ في كل صور الباتش للتجربة
-            p_blur=1.0,     
-            p_illum=1.0     
-        ).to(device)
-
-        mit_dims = (64, 128, 320, 512)
-        self.trans_backbone = MiT(channels=3, dims=mit_dims, n_heads=(1, 2, 5, 8),
-                                  expansion=(8, 8, 4, 4), reduction_ratio=(8, 4, 2, 1),
-                                  n_layers=(2, 2, 2, 2))
-        
-        # (يفترض وجود كود تحميل الأوزان هنا كما في كودك الأصلي... تم تخطيه للاختصار)
-
-        # ⚠️ الحل العلمي: لا تقم بتجميد الـ Transformer بالكامل!
-        # نفتح آخر طبقتين (Block 3 & 4) للتعلم الدقيق لكي يتأقلم مع أنسجة السجاد
-        for name, param in self.trans_backbone.named_parameters():
-            if "block3" in name or "block4" in name or "norm3" in name or "norm4" in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
-
-        # --- ج. وحدات الدمج الهجين (Attentional Feature Fusion) بدلاً من CrossAttention ---
-        self.fusion_blocks = nn.ModuleList([
-            AttentionalFeatureFusion(cnn_dim=cnn_channels[1], trans_dim=mit_dims[0]),
-            AttentionalFeatureFusion(cnn_dim=cnn_channels[2], trans_dim=mit_dims[1]),
-            AttentionalFeatureFusion(cnn_dim=cnn_channels[3], trans_dim=mit_dims[2]),
-            AttentionalFeatureFusion(cnn_dim=cnn_channels[4], trans_dim=mit_dims[3])
+        # --- 2. Embeddings & Transformer ---
+        hidden_size = 1024
+        self.embeddings = EmbeddingsModule(1024, hidden_size, img_size)
+        self.transformer = nn.ModuleList([
+            TransformerBlock(hidden_size, num_heads=16, mlp_dim=4096) for _ in range(4)
         ])
 
-        # (تم حذف self.upsampling لأنه كود ميت لا يُستخدم)
+        # --- 3. Decoder ---
+        self.dec_block1 = DecoderBlock(1024 + 1024, 1024)
+        self.dec_block2 = DecoderBlock(1024 + 512, 512)
+        self.dec_block3 = DecoderBlock(512 + 256, 256)
 
-        # --- د. تجهيز الأبعاد والمفكك ---
-        self.base_dim = 48
-        self.target_channels = [self.base_dim * (2 ** i) for i in range(len(cnn_channels))]
-
-        self.projections = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(src, tgt, kernel_size=1, bias=False),
-                nn.GroupNorm(num_groups=8, num_channels=tgt),
-                nn.ReLU(inplace=True)
-            ) for src, tgt in zip(cnn_channels, self.target_channels)
-        ])
-        
-        mit_dims = (64, 128, 320, 512)
-        self.trans_backbone = MiT(channels=3, dims=mit_dims, n_heads=(1, 2, 5, 8),
-                                  expansion=(8, 8, 4, 4), reduction_ratio=(8, 4, 2, 1),
-                                  n_layers=(2, 2, 2, 2))
-
-        try:
-            logger.info("--> Attempting to download official MiT-B2 weights...")
-            
-            weight_urls = [
-                "https://download.openmmlab.com/mmsegmentation/v0.5/pretrain/segformer/mit_b2_20220624-66e8bf70.pth",
-                "https://huggingface.co/jishi/SegFormer-mit-b2-imagenet-1k/resolve/main/mit_b2.pth"
-            ]
-            
-            state_dict = None
-            for url in weight_urls:
-                try:
-                    logger.info(f"Downloading from: {url}")
-                    checkpoint = torch.hub.load_state_dict_from_url(url, map_location='cpu', progress=True)
-                    state_dict = checkpoint.get('state_dict', checkpoint.get('model', checkpoint))
-                    break 
-                except Exception as dl_err:
-                    logger.warning(f"Failed to download from {url}. Trying next source...")
-                    continue
-            
-            if state_dict is None:
-                raise RuntimeError("All weight servers failed or are unreachable.")
-
-            clean_state_dict = {}
-            for k, v in state_dict.items():
-                clean_key = k.replace('backbone.', '').replace('encoder.', '')
-                clean_state_dict[clean_key] = v
-
-            missing_keys, unexpected_keys = self.trans_backbone.load_state_dict(clean_state_dict, strict=False)
-            logger.info("--> SUCCESS: Pre-trained MiT-B2 weights successfully injected!")
-            if missing_keys:
-                logger.debug(f"Expected unmapped keys (e.g. classification head): {len(missing_keys)} keys.")
-
-        except Exception as e:
-            logger.warning(f"--> Could not inject pre-trained weights: {e}. Model will train from scratch.")
-
-        # for p in self.trans_backbone.parameters():
-        #     p.requires_grad = False
-        for name, param in self.trans_backbone.named_parameters():
-            if "block3" in name or "block4" in name or "norm3" in name or "norm4" in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
-
-        # --- ج. وحدات الدمج الهجين (Attentional Feature Fusion) بدلاً من CrossAttention ---
-        self.fusion_blocks = nn.ModuleList([
-            AttentionalFeatureFusion(cnn_dim=cnn_channels[1], trans_dim=mit_dims[0]),
-            AttentionalFeatureFusion(cnn_dim=cnn_channels[2], trans_dim=mit_dims[1]),
-            AttentionalFeatureFusion(cnn_dim=cnn_channels[3], trans_dim=mit_dims[2]),
-            AttentionalFeatureFusion(cnn_dim=cnn_channels[4], trans_dim=mit_dims[3])
-        ])
-
-        # (تم حذف self.upsampling لأنه كود ميت لا يُستخدم)
-
-        # --- د. تجهيز الأبعاد والمفكك ---
-        self.base_dim = 48
-        self.target_channels = [self.base_dim * (2 ** i) for i in range(len(cnn_channels))]
-
-        self.projections = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(src, tgt, kernel_size=1, bias=False),
-                nn.GroupNorm(num_groups=8, num_channels=tgt),
-                nn.ReLU(inplace=True)
-            ) for src, tgt in zip(cnn_channels, self.target_channels)
-        ])
-        # self.msff = MSFF(in_channels[1:-1]).to(self.device)
-        # self.msff = MSFF(self.target_channels[1:-1]).to(self.device)
-        # self.decoder = Decoder(in_channels).to(self.device)
-        self.decoder = Decoder(self.target_channels).to(self.device)
-        self.evaluator = AnomalyEvaluator(pro_integration_limit=0.3)
-        self.cnn_backbone.to(self.device)
-        self.to(self.device)
-        
-    def forward(self, x):  
-
-        input_size = x.shape[2:]
-        cnn_feats = self.cnn_backbone(x)
-
-        trans_feats = self.trans_backbone(x)
-        hybrid_raw_features = [cnn_feats[0]]  # الطبقة الأولى تبقى CNN نقية
-        for i in range(4):
-            # دمج مستقر عبر التركيبة المحدبة
-            fused = self.fusion_blocks[i](cnn_x=cnn_feats[i+1], trans_x=trans_feats[i])
-            hybrid_raw_features.append(fused)
-        
-        # 3. توحيد القنوات (Projections)
-        features = []
-        for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
-            features.append(proj(feat))
-        
-        f_in = features[0]
-        f_out = features[-1]
-        f_ii = features[1:-1]
-
-        # # 2. MSFF
-        # enable_msff = getattr(self.config, 'enable_msff', True)
-        # if enable_msff:
-        #     msff_outputs = self.msff(features=f_ii)
-        # else:
-        #     msff_outputs = f_ii # تخطي عملية الدمج والـ Attention
-
-        # 3. Decoder
-        outputs = self.decoder(
-            encoder_output=f_out,
-            concat_features=[f_in] + f_ii
+        # --- 4. Final Upsampling ---
+        self.final_upsample = nn.Sequential(
+            nn.ConvTranspose2d(256, 64, kernel_size=2, stride=2, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, num_classes, kernel_size=1)
         )
 
-        if outputs.shape[2:] != input_size:
-            outputs = F.interpolate(
-                outputs,
-                size=input_size, 
-                mode='bilinear',
-                align_corners=True
-            )
+        # تهيئة الأوزان (Weight Initialization)
+        self._initialize_weights()
         
-        # return outputs
-        refined_features = self.cbam(outputs)
+        #########################
+        # backbone_name = config.backbone_name if config else "resnet18"
+        # logger.info(f"--> Building Backbone: {backbone_name}")
+
+        # try:
+        #     self.cnn_backbone = create_model(
+        #         backbone_name,
+        #         pretrained=True,
+        #         features_only=True
+        #     )
+        #     for p in self.cnn_backbone.parameters():
+        #             p.requires_grad = False
+        #     # for name, param in self.cnn_backbone.named_parameters():
+        #     #     if "blocks.4" in name or "blocks.5" in name or "conv_head" in name:
+        #     #         param.requires_grad = True
+        #     #     else:
+        #     #         param.requires_grad = False
+
+        # except RuntimeError as e:
+        #     logger.warning(f"Error.... Default indices failed for {backbone_name}, trying default behavior. c: {e}")
+
+        # cnn_channels = self.cnn_backbone.feature_info.channels()
         
-        out = self.final_conv(refined_features)
+        # self.augmenter = AnomalyTransplanter(
+        #     anomaly_root_dir="datasets/anomaly_generation_datasets/images",
+        #     target = "carpet",
+        #     img_size=224, 
+        #     p_anomaly=0.5,  # 1.0 لضمان ظهور الشذوذ في كل صور الباتش للتجربة
+        #     p_blur=1.0,     
+        #     p_illum=1.0     
+        # ).to(device)
+
+        # mit_dims = (64, 128, 320, 512)
+        # self.trans_backbone = MiT(channels=3, dims=mit_dims, n_heads=(1, 2, 5, 8),
+        #                           expansion=(8, 8, 4, 4), reduction_ratio=(8, 4, 2, 1),
+        #                           n_layers=(2, 2, 2, 2))
+        
+        # # (يفترض وجود كود تحميل الأوزان هنا كما في كودك الأصلي... تم تخطيه للاختصار)
+
+        # # ⚠️ الحل العلمي: لا تقم بتجميد الـ Transformer بالكامل!
+        # # نفتح آخر طبقتين (Block 3 & 4) للتعلم الدقيق لكي يتأقلم مع أنسجة السجاد
+        # for name, param in self.trans_backbone.named_parameters():
+        #     if "block3" in name or "block4" in name or "norm3" in name or "norm4" in name:
+        #         param.requires_grad = True
+        #     else:
+        #         param.requires_grad = False
+
+        # # --- ج. وحدات الدمج الهجين (Attentional Feature Fusion) بدلاً من CrossAttention ---
+        # self.fusion_blocks = nn.ModuleList([
+        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[1], trans_dim=mit_dims[0]),
+        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[2], trans_dim=mit_dims[1]),
+        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[3], trans_dim=mit_dims[2]),
+        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[4], trans_dim=mit_dims[3])
+        # ])
+
+        # # (تم حذف self.upsampling لأنه كود ميت لا يُستخدم)
+
+        # # --- د. تجهيز الأبعاد والمفكك ---
+        # self.base_dim = 48
+        # self.target_channels = [self.base_dim * (2 ** i) for i in range(len(cnn_channels))]
+
+        # self.projections = nn.ModuleList([
+        #     nn.Sequential(
+        #         nn.Conv2d(src, tgt, kernel_size=1, bias=False),
+        #         nn.GroupNorm(num_groups=8, num_channels=tgt),
+        #         nn.ReLU(inplace=True)
+        #     ) for src, tgt in zip(cnn_channels, self.target_channels)
+        # ])
+        
+        # mit_dims = (64, 128, 320, 512)
+        # self.trans_backbone = MiT(channels=3, dims=mit_dims, n_heads=(1, 2, 5, 8),
+        #                           expansion=(8, 8, 4, 4), reduction_ratio=(8, 4, 2, 1),
+        #                           n_layers=(2, 2, 2, 2))
+
+        # try:
+        #     logger.info("--> Attempting to download official MiT-B2 weights...")
+            
+        #     weight_urls = [
+        #         "https://download.openmmlab.com/mmsegmentation/v0.5/pretrain/segformer/mit_b2_20220624-66e8bf70.pth",
+        #         "https://huggingface.co/jishi/SegFormer-mit-b2-imagenet-1k/resolve/main/mit_b2.pth"
+        #     ]
+            
+        #     state_dict = None
+        #     for url in weight_urls:
+        #         try:
+        #             logger.info(f"Downloading from: {url}")
+        #             checkpoint = torch.hub.load_state_dict_from_url(url, map_location='cpu', progress=True)
+        #             state_dict = checkpoint.get('state_dict', checkpoint.get('model', checkpoint))
+        #             break 
+        #         except Exception as dl_err:
+        #             logger.warning(f"Failed to download from {url}. Trying next source...")
+        #             continue
+            
+        #     if state_dict is None:
+        #         raise RuntimeError("All weight servers failed or are unreachable.")
+
+        #     clean_state_dict = {}
+        #     for k, v in state_dict.items():
+        #         clean_key = k.replace('backbone.', '').replace('encoder.', '')
+        #         clean_state_dict[clean_key] = v
+
+        #     missing_keys, unexpected_keys = self.trans_backbone.load_state_dict(clean_state_dict, strict=False)
+        #     logger.info("--> SUCCESS: Pre-trained MiT-B2 weights successfully injected!")
+        #     if missing_keys:
+        #         logger.debug(f"Expected unmapped keys (e.g. classification head): {len(missing_keys)} keys.")
+
+        # except Exception as e:
+        #     logger.warning(f"--> Could not inject pre-trained weights: {e}. Model will train from scratch.")
+
+        # # for p in self.trans_backbone.parameters():
+        # #     p.requires_grad = False
+        # for name, param in self.trans_backbone.named_parameters():
+        #     if "block3" in name or "block4" in name or "norm3" in name or "norm4" in name:
+        #         param.requires_grad = True
+        #     else:
+        #         param.requires_grad = False
+
+        # # --- ج. وحدات الدمج الهجين (Attentional Feature Fusion) بدلاً من CrossAttention ---
+        # self.fusion_blocks = nn.ModuleList([
+        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[1], trans_dim=mit_dims[0]),
+        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[2], trans_dim=mit_dims[1]),
+        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[3], trans_dim=mit_dims[2]),
+        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[4], trans_dim=mit_dims[3])
+        # ])
+
+        # # (تم حذف self.upsampling لأنه كود ميت لا يُستخدم)
+
+        # # --- د. تجهيز الأبعاد والمفكك ---
+        # self.base_dim = 48
+        # self.target_channels = [self.base_dim * (2 ** i) for i in range(len(cnn_channels))]
+
+        # self.projections = nn.ModuleList([
+        #     nn.Sequential(
+        #         nn.Conv2d(src, tgt, kernel_size=1, bias=False),
+        #         nn.GroupNorm(num_groups=8, num_channels=tgt),
+        #         nn.ReLU(inplace=True)
+        #     ) for src, tgt in zip(cnn_channels, self.target_channels)
+        # ])
+        # # self.msff = MSFF(in_channels[1:-1]).to(self.device)
+        # # self.msff = MSFF(self.target_channels[1:-1]).to(self.device)
+        # # self.decoder = Decoder(in_channels).to(self.device)
+        # self.decoder = Decoder(self.target_channels).to(self.device)
+        # self.evaluator = AnomalyEvaluator(pro_integration_limit=0.3)
+        # self.cnn_backbone.to(self.device)
+        self.to(self.device)
+
+    ############################
+    def _initialize_weights(self):
+        """تهيئة الأوزان رياضياً لضمان الاستقرار لأننا لا نستخدم أوزان ImageNet جاهزة"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+    def forward(self, x):
+        # ---------- Encoder ----------
+        skip1, skip2, skip3 = self.encoder(x)
+
+        # ---------- Transformer ----------
+        emb, H_emb, W_emb = self.embeddings(skip3)
+        trans_out = emb
+        for layer in self.transformer:
+            trans_out = layer(trans_out)
+
+        B, N, C = trans_out.shape
+        trans_out = trans_out.transpose(1, 2).view(B, C, H_emb, W_emb)
+
+        # ---------- Decoder ----------
+        dec1 = torch.cat([trans_out, skip3], dim=1)
+        dec1 = self.dec_block1(dec1)
+
+        dec1_up = F.interpolate(dec1, scale_factor=2.0, mode='bilinear', align_corners=False)
+        dec2 = torch.cat([dec1_up, skip2], dim=1)
+        dec2 = self.dec_block2(dec2)
+
+        dec2_up = F.interpolate(dec2, scale_factor=2.0, mode='bilinear', align_corners=False)
+        dec3 = torch.cat([dec2_up, skip1], dim=1)
+        dec3 = self.dec_block3(dec3)
+
+        out = self.final_upsample(dec3)
         return out
+    ################################
+    
+    # def forward(self, x):  
+
+    #     input_size = x.shape[2:]
+    #     cnn_feats = self.cnn_backbone(x)
+
+    #     trans_feats = self.trans_backbone(x)
+    #     hybrid_raw_features = [cnn_feats[0]]  # الطبقة الأولى تبقى CNN نقية
+    #     for i in range(4):
+    #         # دمج مستقر عبر التركيبة المحدبة
+    #         fused = self.fusion_blocks[i](cnn_x=cnn_feats[i+1], trans_x=trans_feats[i])
+    #         hybrid_raw_features.append(fused)
+        
+    #     # 3. توحيد القنوات (Projections)
+    #     features = []
+    #     for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
+    #         features.append(proj(feat))
+        
+    #     f_in = features[0]
+    #     f_out = features[-1]
+    #     f_ii = features[1:-1]
+
+    #     # # 2. MSFF
+    #     # enable_msff = getattr(self.config, 'enable_msff', True)
+    #     # if enable_msff:
+    #     #     msff_outputs = self.msff(features=f_ii)
+    #     # else:
+    #     #     msff_outputs = f_ii # تخطي عملية الدمج والـ Attention
+
+    #     # 3. Decoder
+    #     outputs = self.decoder(
+    #         encoder_output=f_out,
+    #         concat_features=[f_in] + f_ii
+    #     )
+
+    #     if outputs.shape[2:] != input_size:
+    #         outputs = F.interpolate(
+    #             outputs,
+    #             size=input_size, 
+    #             mode='bilinear',
+    #             align_corners=True
+    #         )
+        
+    #     # return outputs
+    #     refined_features = self.cbam(outputs)
+        
+    #     out = self.final_conv(refined_features)
+    #     return out
 
     def fit(self, train_loader, test_loader=None, save_dir=None):
         num_training_steps = self.config.num_epochs
