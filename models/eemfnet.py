@@ -44,32 +44,32 @@ logger = logging.getLogger(__name__)
 if not hasattr(np, 'trapz'):
     np.trapz = np.trapezoid
 
-# ==========================================
-# 1. Metrics & Losses (المقاييس ودوال الخسارة)
-# ==========================================
-def dice_coefficient(y_true, y_pred, smooth=100.0):
-    # تسطيح المصفوفات
-    y_true_f = y_true.reshape(-1)
-    y_pred_f = y_pred.reshape(-1)
+# # ==========================================
+# # 1. Metrics & Losses (المقاييس ودوال الخسارة)
+# # ==========================================
+# def dice_coefficient(y_true, y_pred, smooth=100.0):
+#     # تسطيح المصفوفات
+#     y_true_f = y_true.reshape(-1)
+#     y_pred_f = y_pred.reshape(-1)
     
-    intersection = torch.sum(y_true_f * y_pred_f)
-    union = torch.sum(y_true_f) + torch.sum(y_pred_f)
-    return (2. * intersection + smooth) / (union + smooth)
+#     intersection = torch.sum(y_true_f * y_pred_f)
+#     union = torch.sum(y_true_f) + torch.sum(y_pred_f)
+#     return (2. * intersection + smooth) / (union + smooth)
 
-def dice_coefficient_loss(y_true, y_pred, smooth=100.0):
-    # في PyTorch نستخدم (1 - dice) لكي نجعل الدالة تصغر نحو الصفر
-    return 1.0 - dice_coefficient(y_true, y_pred, smooth)
+# def dice_coefficient_loss(y_true, y_pred, smooth=100.0):
+#     # في PyTorch نستخدم (1 - dice) لكي نجعل الدالة تصغر نحو الصفر
+#     return 1.0 - dice_coefficient(y_true, y_pred, smooth)
 
-def iou_score(y_true, y_pred, smooth=100.0):
-    y_true_f = y_true.reshape(-1)
-    y_pred_f = y_pred.reshape(-1)
+# def iou_score(y_true, y_pred, smooth=100.0):
+#     y_true_f = y_true.reshape(-1)
+#     y_pred_f = y_pred.reshape(-1)
     
-    intersection = torch.sum(y_true_f * y_pred_f)
-    sum_vals = torch.sum(y_true_f + y_pred_f)
-    return (intersection + smooth) / (sum_vals - intersection + smooth)
+#     intersection = torch.sum(y_true_f * y_pred_f)
+#     sum_vals = torch.sum(y_true_f + y_pred_f)
+#     return (intersection + smooth) / (sum_vals - intersection + smooth)
 
-def jaccard_distance(y_true, y_pred, smooth=100.0):
-    return 1.0 - iou_score(y_true, y_pred, smooth)
+# def jaccard_distance(y_true, y_pred, smooth=100.0):
+#     return 1.0 - iou_score(y_true, y_pred, smooth)
 
 # # ------- 1. define loss function --------
 
@@ -402,9 +402,9 @@ class EEMFNet(nn.Module):
         self.final_up = nn.ConvTranspose2d(decoder_in_ch, 32, kernel_size=3, stride=2, padding=1, output_padding=1)
         self.final_conv = nn.Sequential(
             DoubleConv(32, 16),
-            nn.Conv2d(16, 1, kernel_size=1)
+            nn.Conv2d(16, 2, kernel_size=1)
         )
-        self.sigmoid = nn.Sigmoid()
+        # self.sigmoid = nn.Sigmoid()
         #####################
         # self.net = U2NET(3, 1)
         # self.optimizer = optim.Adam(self.net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
@@ -565,7 +565,8 @@ class EEMFNet(nn.Module):
         final_out = self.final_up(dec_out)
         final_out = self.final_conv(final_out)
         
-        return self.sigmoid(final_out)
+        # return self.sigmoid(final_out)
+        return final_out
 
     # def forward(self, x):  
 
@@ -644,7 +645,7 @@ class EEMFNet(nn.Module):
         # composite_weight = self.config.composite_weight
         # focal_weight = self.config.focal_weight
 
-        # criterion = IoUOptimizedLoss(dice_weight=0.6, focal_weight=0.4).to(self.device)
+        criterion = IoUOptimizedLoss(dice_weight=0.6, focal_weight=0.4).to(self.device)
         # criterion = EEMFNetLoss(focal_weight=0.6, dice_weight=0.4).to(self.device)
         
         ##############################
@@ -716,11 +717,11 @@ class EEMFNet(nn.Module):
                 # # # loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
                 # # loss =(composite_weight * loss_c) + (focal_weight * loss_f)
 
-                # loss = criterion(outputs, masks)
+                loss = criterion(outputs, masks)
                 # # anomaly_preds = outputs[:, 1, :, :] # استخراج قناة الشذوذ
     
                 # # loss = criterion(anomaly_preds, masks)
-                loss = dice_coefficient_loss(masks, outputs[:, 0, :, :])
+                # loss = dice_coefficient_loss(masks, outputs[:, 0, :, :])
                 loss.backward()
                 # torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 optimizer.step()
@@ -854,7 +855,8 @@ class EEMFNet(nn.Module):
                 # pred = self(images)
                 # d1,d2,d3,d4,d5,d6,d7= self.net(images)
 
-                pred = outputs[:,0,:,:]
+                # pred = outputs[:,0,:,:]
+                pred = outputs[:,1,:]
                 anomaly_score_i = torch.topk(torch.flatten(pred, start_dim=1), 100)[0].mean(dim=1)
                 
                 image_scores.extend(anomaly_score_i.cpu())
