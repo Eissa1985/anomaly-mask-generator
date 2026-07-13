@@ -163,7 +163,10 @@ class IoUOptimizedLoss(nn.Module):
         """
         # 1. تحويل الخرج الخام (Logits) إلى احتمالات (Probabilities)
         # استخدام log_softmax().exp() بدلاً من softmax() للاستقرار العددي (من مكتبة SMP)
-        probs = F.softmax(logits, dim=1)[:, 1:2, :, :]
+        probs = F.softmax(logits, dim=1)
+        focal_val = self.focal_loss(probs, targets)
+        
+        probs = probs[:, 1:2, :, :]
         
         # 2. التأكد من تطابق أبعاد الأهداف لتجنب أخطاء الـ Broadcasting
         if targets.dim() == 3:
@@ -173,7 +176,6 @@ class IoUOptimizedLoss(nn.Module):
         # 3. حساب الخسائر المنفصلة
         bce_val = self.bce_loss(probs, targets)
         dice_val = self.dice_loss(probs, targets)
-        focal_val = self.focal_loss(logits, targets)
         
         # 4. الدمج بالأوزان المحددة لرفع الـ IoU
         total_loss = (0.6 * (0.5 * dice_val + 0.5 * bce_val)) + (0.4 * focal_val)
