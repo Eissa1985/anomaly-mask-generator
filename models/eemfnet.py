@@ -34,6 +34,7 @@ import math
 from PIL import Image
 import torchvision.transforms.functional as TF
 import warnings
+from .model import U2NET
 
 warnings.filterwarnings('ignore', category=RuntimeWarning, message='invalid value encountered in divide')
 
@@ -42,6 +43,24 @@ logger = logging.getLogger(__name__)
 if not hasattr(np, 'trapz'):
     np.trapz = np.trapezoid
 
+# ------- 1. define loss function --------
+
+bce_loss = nn.BCELoss(size_average=True)
+
+def muti_bce_loss_fusion(d0, d1, d2, d3, d4, d5, d6, labels_v):
+
+	loss0 = bce_loss(d0,labels_v)
+	loss1 = bce_loss(d1,labels_v)
+	loss2 = bce_loss(d2,labels_v)
+	loss3 = bce_loss(d3,labels_v)
+	loss4 = bce_loss(d4,labels_v)
+	loss5 = bce_loss(d5,labels_v)
+	loss6 = bce_loss(d6,labels_v)
+
+	loss = loss0 + loss1 + loss2 + loss3 + loss4 + loss5 + loss6
+	print("l0: %3f, l1: %3f, l2: %3f, l3: %3f, l4: %3f, l5: %3f, l6: %3f\n"%(loss0.data.item(),loss1.data.item(),loss2.data.item(),loss3.data.item(),loss4.data.item(),loss5.data.item(),loss6.data.item()))
+
+	return loss0, loss
        
 # class ChannelProjector(nn.Module):
 #     def __init__(self, in_channels, out_channels):
@@ -228,215 +247,6 @@ class AnomalyTransplanter(nn.Module):
         a_imgs = TF.normalize(a_imgs, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         
         return a_imgs, train_masks, targets
-###########################
-from torchvision.models import resnet50, ResNet50_Weights
-import math
-
-# ==========================================
-# 1. Dynamic/Deformable Convolution (DSConv)
-# ==========================================
-class DSConv(nn.Module):
-    """
-    تطبيق الـ DSConv. 
-    هذه هي الطبقة الوحيدة في الـ Encoder التي ستظل قابلة للتدريب
-    لأنها لا تنتمي لـ ResNet-50 القياسي ولا تمتلك أوزاناً مسبقة.
-    """
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
-        super(DSConv, self).__init__()
-        self.offset_conv = nn.Conv2d(
-            in_channels, 
-            2 * kernel_size * kernel_size, 
-            kernel_size=kernel_size, 
-            stride=stride, 
-            padding=padding, 
-            bias=False
-        )
-        self.deform_conv = torchvision.ops.DeformConv2d(
-            in_channels, 
-            out_channels, 
-            kernel_size=kernel_size, 
-            stride=stride, 
-            padding=padding, 
-            bias=False
-        )
-
-    def forward(self, x):
-        offsets = self.offset_conv(x)
-        return self.deform_conv(x, offsets)
-
-# ==========================================
-# 2. ResNet-50 Modified Bottleneck (D-Bottleneck)
-# ==========================================
-class DBottleneck(nn.Module):
-    """
-    نسخة معدلة من Bottleneck الخاص بـ ResNet-50.
-    التسميات هنا (conv1, bn1, etc.) تطابق التسميات الرسمية لنسخ الأوزان.
-    """
-    expansion = 4
-
-    def __init__(self, in_channels, mid_channels, stride=1):
-        super(DBottleneck, self).__init__()
-        out_channels = mid_channels * self.expansion
-
-        self.conv1 = nn.Conv2d(in_channels, mid_channels, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(mid_channels)
-
-        self.conv2 = nn.Conv2d(mid_channels, mid_channels, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(mid_channels)
-
-        # الطبقة الإضافية (سيتم استثناؤها من التجميد)
-        self.dsconv = DSConv(mid_channels, mid_channels, kernel_size=3, padding=1)
-        self.bn_ds = nn.BatchNorm2d(mid_channels)
-
-        self.conv3 = nn.Conv2d(mid_channels, out_channels, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(out_channels)
-
-        self.relu = nn.ReLU(inplace=True)
-
-        self.downsample = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
-            self.downsample = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels)
-            )
-
-    def forward(self, x):
-        identity = self.downsample(x)
-
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.relu(self.bn2(self.conv2(out)))
-        out = self.relu(self.bn_ds(self.dsconv(out))) # تمرير عبر DSConv
-        out = self.bn3(self.conv3(out))
-
-        out += identity
-        return self.relu(out)
-
-# ==========================================
-# 3. ResNet-50 D-Encoder (نسخ وتجميد صريح للأوزان)
-# ==========================================
-class ResNet50_D_Encoder(nn.Module):
-    def __init__(self, in_channels=3, pretrained=True):
-        super(ResNet50_D_Encoder, self).__init__()
-        
-        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-        self.layer1 = self._make_layer(in_channels=64, mid_channels=64, num_blocks=3, stride=1)
-        self.layer2 = self._make_layer(in_channels=256, mid_channels=128, num_blocks=6, stride=2)
-        self.layer3 = self._make_layer(in_channels=512, mid_channels=256, num_blocks=9, stride=2)
-
-        if pretrained:
-            print("--> Fetching ResNet-50 Pre-trained Weights...")
-            official_resnet = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
-            
-            # 1. النسخ المباشر للأوزان
-            self.load_state_dict(official_resnet.state_dict(), strict=False)
-            print("--> Weights copied successfully.")
-            
-            # 2. التجميد الإجباري (Brute-force Freezing)
-            frozen_count = 0
-            trainable_count = 0
-            
-            for name, param in self.named_parameters():
-                # إذا كان اسم الطبقة يحتوي على 'dsconv' أو الباتش نورم الخاص بها
-                if 'dsconv' in name or 'bn_ds' in name:
-                    param.requires_grad = True
-                    trainable_count += 1
-                else:
-                    # تجميد كل ما تبقى (والذي يمثل ResNet-50 الأصلي)
-                    param.requires_grad = False
-                    frozen_count += 1
-                    
-            print(f"--> [Done]: FROZE {frozen_count} standard ResNet-50 parameters.")
-            print(f"--> [Done]: KEPT {trainable_count} new DSConv parameters trainable.")
-
-    def _make_layer(self, in_channels, mid_channels, num_blocks, stride):
-        layers = []
-        layers.append(DBottleneck(in_channels, mid_channels, stride))
-        out_channels = mid_channels * DBottleneck.expansion
-        for _ in range(1, num_blocks):
-            layers.append(DBottleneck(out_channels, mid_channels, 1))
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-
-        skip1 = self.layer1(x)     # Output: [B, 256, H/4, W/4]
-        skip2 = self.layer2(skip1) # Output: [B, 512, H/8, W/8]
-        skip3 = self.layer3(skip2) # Output: [B, 1024, H/16, W/16]
-        return skip1, skip2, skip3
-
-# ==========================================
-# 4. Embeddings & Transformer Modules
-# ==========================================
-class EmbeddingsModule(nn.Module):
-    def __init__(self, in_channels, hidden_size, img_size=224):
-        super(EmbeddingsModule, self).__init__()
-        self.conv2d = nn.Conv2d(in_channels, hidden_size, kernel_size=1, bias=False)
-        grid_size = img_size // 16
-        num_patches = grid_size * grid_size
-        self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches, hidden_size))
-        self.dropout = nn.Dropout(0.1)
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        x = self.conv2d(x)
-        x = x.flatten(2).transpose(1, 2)
-        
-        if self.position_embeddings.shape[1] != x.shape[1]:
-            pos_emb = self.position_embeddings.transpose(1, 2).view(1, -1, int(math.sqrt(self.position_embeddings.shape[1])), int(math.sqrt(self.position_embeddings.shape[1])))
-            pos_emb = F.interpolate(pos_emb, size=(H, W), mode='bilinear', align_corners=False)
-            pos_emb = pos_emb.view(1, -1, H * W).transpose(1, 2)
-            x = x + pos_emb
-        else:
-            x = x + self.position_embeddings
-            
-        x = self.dropout(x)
-        return x, H, W
-
-class TransformerBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, mlp_dim):
-        super(TransformerBlock, self).__init__()
-        self.norm1 = nn.LayerNorm(hidden_size)
-        self.msa = nn.MultiheadAttention(hidden_size, num_heads, batch_first=True)
-        self.norm2 = nn.LayerNorm(hidden_size)
-        self.mlp = nn.Sequential(
-            nn.Linear(hidden_size, mlp_dim),
-            nn.GELU(),
-            nn.Linear(mlp_dim, hidden_size)
-        )
-
-    def forward(self, x):
-        x_norm = self.norm1(x)
-        attn_out, _ = self.msa(x_norm, x_norm, x_norm)
-        x = x + attn_out
-        x = x + self.mlp(self.norm2(x))
-        return x
-
-# ==========================================
-# 5. Decoder Block Module
-# ==========================================
-class DecoderBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(DecoderBlock, self).__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self, x):
-        return self.block(x)
-
-##############################
 
 class EEMFNet(nn.Module):
     # def __init__(self, device='cpu', config=None):
@@ -464,37 +274,10 @@ class EEMFNet(nn.Module):
         self.evaluator = AnomalyEvaluator(pro_integration_limit=0.3)
 
 
-        ##########################
-        # --- تهيئة جميع الأوزان بشكل افتراضي ---
-        self._initialize_weights()
+        self.net = U2NET(3, 1)
+        # self.optimizer = optim.Adam(net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
 
-        # --- 1. ResNet-50 based D-Encoder (ينسخ ويجمد هنا) ---
-        self.encoder = ResNet50_D_Encoder(in_channels, pretrained=True)
-
-        # --- 2. Embeddings & Transformer ---
-        hidden_size = 1024
-        self.embeddings = EmbeddingsModule(1024, hidden_size, img_size)
-        self.transformer = nn.ModuleList([
-            TransformerBlock(hidden_size, num_heads=16, mlp_dim=4096) for _ in range(4)
-        ])
-
-        # --- 3. Decoder ---
-        self.dec_block1 = DecoderBlock(1024 + 1024, 1024)
-        self.dec_block2 = DecoderBlock(1024 + 512, 512)
-        self.dec_block3 = DecoderBlock(512 + 256, 256)
-
-        # --- 4. Final Upsampling ---
-        self.final_upsample = nn.Sequential(
-            nn.ConvTranspose2d(256, 64, kernel_size=2, stride=2, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, num_classes, kernel_size=1) 
-        )
         
-        #########################
         # backbone_name = config.backbone_name if config else "resnet18"
         # logger.info(f"--> Building Backbone: {backbone_name}")
 
@@ -632,44 +415,6 @@ class EEMFNet(nn.Module):
         # self.cnn_backbone.to(self.device)
         self.to(self.device)
 
-    ############################
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.LayerNorm):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
-    def forward(self, x):
-        # ---------- Encoder ----------
-        skip1, skip2, skip3 = self.encoder(x)
-
-        # ---------- Transformer ----------
-        emb, H_emb, W_emb = self.embeddings(skip3)
-        trans_out = emb
-        for layer in self.transformer:
-            trans_out = layer(trans_out)
-
-        B, N, C = trans_out.shape
-        trans_out = trans_out.transpose(1, 2).view(B, C, H_emb, W_emb)
-
-        # ---------- Decoder ----------
-        dec1 = torch.cat([trans_out, skip3], dim=1)
-        dec1 = self.dec_block1(dec1)
-
-        dec1_up = F.interpolate(dec1, scale_factor=2.0, mode='bilinear', align_corners=False)
-        dec2 = torch.cat([dec1_up, skip2], dim=1)
-        dec2 = self.dec_block2(dec2)
-
-        dec2_up = F.interpolate(dec2, scale_factor=2.0, mode='bilinear', align_corners=False)
-        dec3 = torch.cat([dec2_up, skip1], dim=1)
-        dec3 = self.dec_block3(dec3)
-
-        out = self.final_upsample(dec3)
-        return out
-    ################################
-    
     # def forward(self, x):  
 
     #     input_size = x.shape[2:]
@@ -764,7 +509,9 @@ class EEMFNet(nn.Module):
             if hasattr(train_loader.dataset, "set_epoch"):
                 train_loader.dataset.set_epoch(epoch)
             # logger.info(f"Epoch {epoch}: Difficulty Level {train_loader.dataset.difficulty_level:.2f}")    
-            self.train() 
+            # self.train() 
+            self.net.train()
+            
             # self.cnn_backbone.eval()
             # self.trans_backbone.eval()
             # self.cnn_backbone.layer4.train()
@@ -788,31 +535,36 @@ class EEMFNet(nn.Module):
 
                 # optimizer.zero_grad(set_to_none=True)
                 
-                outputs = self(images)
+                # outputs = self(images)
+                d0, d1, d2, d3, d4, d5, d6 = self.net(images)
+                loss2, loss = muti_bce_loss_fusion(d0, d1, d2, d3, d4, d5, d6, labels_v)
 
-                # loss_f = focal_criterion(outputs, masks)
-                # outputs = F.softmax(outputs, dim=1)
-                # if isinstance(outputs, (list, tuple)): outputs = outputs[0]
-                # masks = masks.unsqueeze(1).float() if masks.dim() == 3 else masks.float()
-                # # loss_c = pc_criterion(outputs[:, 1, :, :], masks)
-                # loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
-                # # loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
-                # # loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
-                # # loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
-                # loss =(composite_weight * loss_c) + (focal_weight * loss_f)
+                # # loss_f = focal_criterion(outputs, masks)
+                # # outputs = F.softmax(outputs, dim=1)
+                # # if isinstance(outputs, (list, tuple)): outputs = outputs[0]
+                # # masks = masks.unsqueeze(1).float() if masks.dim() == 3 else masks.float()
+                # # # loss_c = pc_criterion(outputs[:, 1, :, :], masks)
+                # # loss_c = pc_criterion(outputs[:, 1:2, :, :], masks)
+                # # # loss_s = spectral_criterion(outputs[:, 1, :, :], masks)
+                # # # loss_s = spectral_criterion(outputs[:, 1:2, :, :], masks)
+                # # # loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
+                # # loss =(composite_weight * loss_c) + (focal_weight * loss_f)
 
-                loss = criterion(outputs, masks)
-                # anomaly_preds = outputs[:, 1, :, :] # استخراج قناة الشذوذ
+                # loss = criterion(outputs, masks)
+                # # anomaly_preds = outputs[:, 1, :, :] # استخراج قناة الشذوذ
     
-                # loss = criterion(anomaly_preds, masks)
+                # # loss = criterion(anomaly_preds, masks)
                 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 optimizer.step()
                 optimizer.zero_grad()
+                
 
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': loss.item()})
+
+                del d0, d1, d2, d3, d4, d5, d6, loss2, loss
 
             pbar.close()
 
@@ -918,12 +670,22 @@ class EEMFNet(nn.Module):
 
 
     def predict(self, test_loader):
-        self.eval() 
+        # self.eval() 
+        self.net.eval()
         anomaly_maps = []
         image_scores = []
         gt_labels = []
         gt_masks = []
+
+        # normalize the predicted SOD probability map
+        def normPRED(d):
+            ma = torch.max(d)
+            mi = torch.min(d)
         
+            dn = (d-mi)/(ma-mi)
+        
+            return dn
+            
         with torch.no_grad():
             total_inference_time = 0.0
             total_images = 0
@@ -931,17 +693,32 @@ class EEMFNet(nn.Module):
                 images, masks, labels = images.to(self.device), masks.to(self.device), labels.to(self.device)
                 
                 start_t = time.time()    
-                outputs = self(images)
-                total_inference_time += (time.time() - start_t)
-                total_images += images.size(0)
-                outputs = F.softmax(outputs, dim=1)
-                anomaly_score_i = torch.topk(torch.flatten(outputs[:,1,:], start_dim=1), 100)[0].mean(dim=1)
+                # outputs = self(images)
+                d1,d2,d3,d4,d5,d6,d7= self.net(images)
+
+                # normalization
+                pred = d1[:,0,:,:]
+                pred = normPRED(pred)
+                anomaly_score_i = torch.topk(torch.flatten(pred, start_dim=1), 100)[0].mean(dim=1)
                 
                 image_scores.extend(anomaly_score_i.cpu())
-                anomaly_maps.extend(outputs[:,1,:].cpu().numpy())
+                anomaly_maps.extend(pred.cpu().data.numpy())
                 
                 gt_labels.extend(labels.cpu().numpy())
-                gt_masks.extend(masks.cpu().numpy())
+                gt_masks.extend(masks.cpu().data.numpy())
+
+                
+                
+                total_inference_time += (time.time() - start_t)
+                total_images += images.size(0)
+                # # outputs = F.softmax(outputs, dim=1)
+                # anomaly_score_i = torch.topk(torch.flatten(outputs[:,1,:], start_dim=1), 100)[0].mean(dim=1)
+                
+                # image_scores.extend(anomaly_score_i.cpu())
+                # anomaly_maps.extend(outputs[:,1,:].cpu().numpy())
+                
+                # gt_labels.extend(labels.cpu().numpy())
+                # gt_masks.extend(masks.cpu().numpy())
         
         inference_speed = total_inference_time / total_images
         if len(anomaly_maps) > 0:
