@@ -34,7 +34,8 @@ import math
 from PIL import Image
 import torchvision.transforms.functional as TF
 import warnings
-from .model import U2NET
+from .u2net import U2NET
+from torch.autograd import Variable
 
 warnings.filterwarnings('ignore', category=RuntimeWarning, message='invalid value encountered in divide')
 
@@ -43,24 +44,58 @@ logger = logging.getLogger(__name__)
 if not hasattr(np, 'trapz'):
     np.trapz = np.trapezoid
 
-# ------- 1. define loss function --------
+# ==========================================
+# 1. Metrics & Losses (المقاييس ودوال الخسارة)
+# ==========================================
+def dice_coefficient(y_true, y_pred, smooth=100.0):
+    # تسطيح المصفوفات
+    y_true_f = y_true.reshape(-1)
+    y_pred_f = y_pred.reshape(-1)
+    
+    intersection = torch.sum(y_true_f * y_pred_f)
+    union = torch.sum(y_true_f) + torch.sum(y_pred_f)
+    return (2. * intersection + smooth) / (union + smooth)
 
-bce_loss = nn.BCELoss(size_average=True)
+def dice_coefficient_loss(y_true, y_pred, smooth=100.0):
+    # في PyTorch نستخدم (1 - dice) لكي نجعل الدالة تصغر نحو الصفر
+    return 1.0 - dice_coefficient(y_true, y_pred, smooth)
 
-def muti_bce_loss_fusion(d0, d1, d2, d3, d4, d5, d6, labels_v):
+def iou_score(y_true, y_pred, smooth=100.0):
+    y_true_f = y_true.reshape(-1)
+    y_pred_f = y_pred.reshape(-1)
+    
+    intersection = torch.sum(y_true_f * y_pred_f)
+    sum_vals = torch.sum(y_true_f + y_pred_f)
+    return (intersection + smooth) / (sum_vals - intersection + smooth)
 
-	loss0 = bce_loss(d0,labels_v)
-	loss1 = bce_loss(d1,labels_v)
-	loss2 = bce_loss(d2,labels_v)
-	loss3 = bce_loss(d3,labels_v)
-	loss4 = bce_loss(d4,labels_v)
-	loss5 = bce_loss(d5,labels_v)
-	loss6 = bce_loss(d6,labels_v)
+def jaccard_distance(y_true, y_pred, smooth=100.0):
+    return 1.0 - iou_score(y_true, y_pred, smooth)
 
-	loss = loss0 + loss1 + loss2 + loss3 + loss4 + loss5 + loss6
-	print("l0: %3f, l1: %3f, l2: %3f, l3: %3f, l4: %3f, l5: %3f, l6: %3f\n"%(loss0.data.item(),loss1.data.item(),loss2.data.item(),loss3.data.item(),loss4.data.item(),loss5.data.item(),loss6.data.item()))
+# # ------- 1. define loss function --------
 
-	return loss0, loss
+# bce_loss = nn.BCELoss(size_average=True)
+
+# def muti_bce_loss_fusion(d0, d1, d2, d3, d4, d5, d6, labels_v):
+
+#     # 1. أضف هذا السطر لحل مشكلة الأبعاد
+#     if labels_v.dim() == 3:
+#         labels_v = labels_v.unsqueeze(1)
+        
+#     # 2. تأكد أن الهدف من نوع Float 
+#     labels_v = labels_v.float()
+
+#     loss0 = bce_loss(d0,labels_v)
+#     loss1 = bce_loss(d1,labels_v)
+#     loss2 = bce_loss(d2,labels_v)
+#     loss3 = bce_loss(d3,labels_v)
+#     loss4 = bce_loss(d4,labels_v)
+#     loss5 = bce_loss(d5,labels_v)
+#     loss6 = bce_loss(d6,labels_v)
+
+#     loss = loss0 + loss1 + loss2 + loss3 + loss4 + loss5 + loss6
+#     # print("l0: %3f, l1: %3f, l2: %3f, l3: %3f, l4: %3f, l5: %3f, l6: %3f\n"%(loss0.data.item(),loss1.data.item(),loss2.data.item(),loss3.data.item(),loss4.data.item(),loss5.data.item(),loss6.data.item()))
+
+#     return loss0, loss
        
 # class ChannelProjector(nn.Module):
 #     def __init__(self, in_channels, out_channels):
@@ -248,6 +283,64 @@ class AnomalyTransplanter(nn.Module):
         
         return a_imgs, train_masks, targets
 
+########################
+# ==========================================
+# 2. Network Blocks (وحدات بناء الشبكة)
+# ==========================================
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels, dropout_rate=0.2):
+        super(DoubleConv, self).__init__()
+        self.step1 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.Dropout2d(dropout_rate),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+        self.step2 = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.Dropout2d(dropout_rate),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        x = self.step1(x)
+        x = self.step2(x)
+        return x
+
+# ملاحظة: تم حذف EncoderBlock لأننا سنستخدم cnn_backbone بدلاً منه
+
+class SpatialAttentionBlock(nn.Module):
+    def __init__(self):
+        super(SpatialAttentionBlock, self).__init__()
+        self.conv = nn.Conv2d(in_channels=2, out_channels=1, kernel_size=7, padding=3, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        max_pool = torch.max(x, dim=1, keepdim=True)[0]
+        avg_pool = torch.mean(x, dim=1, keepdim=True)
+        concat = torch.cat([max_pool, avg_pool], dim=1)
+        attention = self.sigmoid(self.conv(concat))
+        return x * attention
+
+class DecoderBlock(nn.Module):
+    def __init__(self, in_channels, skip_channels, num_filters, dropout_rate=0.2):
+        super(DecoderBlock, self).__init__()
+        self.up = nn.ConvTranspose2d(in_channels, num_filters, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.conv = DoubleConv(num_filters + skip_channels, num_filters, dropout_rate)
+
+    def forward(self, x, skip_features):
+        x = self.up(x)
+        
+        # مطابقة الأبعاد مكانياً في حال كان هناك اختلاف طفيف (تأمين إضافي)
+        if x.shape[2:] != skip_features.shape[2:]:
+            x = F.interpolate(x, size=skip_features.shape[2:], mode='bilinear', align_corners=False)
+            
+        x = torch.cat([x, skip_features], dim=1)
+        x = self.conv(x)
+        return x
+###################################
+
 class EEMFNet(nn.Module):
     # def __init__(self, device='cpu', config=None):
     def __init__(self, device='cpu', config=None, in_channels=3, num_classes=2, img_size=224):
@@ -272,13 +365,51 @@ class EEMFNet(nn.Module):
         ).to(device)
 
         self.evaluator = AnomalyEvaluator(pro_integration_limit=0.3)
+        backbone_name = config.backbone_name if config else "resnet18"
 
+        #################
+        self.cnn_backbone = timm.create_model(
+            backbone_name,
+            pretrained=True,
+            in_chans=in_channels,
+            features_only=True # استخراج مسارات التخطي تلقائياً
+        )
+        
+        # تجميد الأوزان بالكامل للـ Encoder
+        for p in self.cnn_backbone.parameters():
+            p.requires_grad = False
+            
+        # استخراج قنوات الـ Backbone ديناميكياً (مثل [64, 64, 128, 256, 512] للـ ResNet34)
+        cnn_channels = self.cnn_backbone.feature_info.channels()
 
-        self.net = U2NET(3, 1)
-        # self.optimizer = optim.Adam(net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
+        # 2. Spatial Attention يطبق على أعمق خريطة
+        self.sa = SpatialAttentionBlock()
+
+        # 3. بناء الـ Decoder ديناميكياً ليتكيف مع أي موديل
+        self.decoders = nn.ModuleList()
+        decoder_in_ch = cnn_channels[-1]
+        
+        # بناء الـ Decoder عكسياً من القنوات العميقة إلى السطحية
+        for i in range(len(cnn_channels) - 2, -1, -1):
+            skip_ch = cnn_channels[i]
+            num_filters = skip_ch 
+            self.decoders.append(
+                DecoderBlock(decoder_in_ch, skip_ch, num_filters, dropout_rate=0.2)
+            )
+            decoder_in_ch = num_filters
+
+        # 4. التكبير النهائي (للرجوع إلى دقة الصورة الأصلية 1/1)
+        self.final_up = nn.ConvTranspose2d(decoder_in_ch, 32, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.final_conv = nn.Sequential(
+            DoubleConv(32, 16),
+            nn.Conv2d(16, 1, kernel_size=1)
+        )
+        self.sigmoid = nn.Sigmoid()
+        #####################
+        # self.net = U2NET(3, 1)
+        # self.optimizer = optim.Adam(self.net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
 
         
-        # backbone_name = config.backbone_name if config else "resnet18"
         # logger.info(f"--> Building Backbone: {backbone_name}")
 
         # try:
@@ -415,6 +546,27 @@ class EEMFNet(nn.Module):
         # self.cnn_backbone.to(self.device)
         self.to(self.device)
 
+    def forward(self, x):
+        # استخراج الخصائص من الـ Encoder المجمد
+        features = self.cnn_backbone(x)
+        
+        # تطبيق الانتباه المكاني على آخر خريطة (أعمق واحدة)
+        sa = self.sa(features[-1])
+        
+        # فك التشفير (Decoder)
+        dec_out = sa
+        # استبعاد الخريطة الأخيرة، وعكس الباقي لعمل مسارات التخطي
+        skip_features = features[:-1][::-1] 
+        
+        for i, decoder in enumerate(self.decoders):
+            dec_out = decoder(dec_out, skip_features[i])
+            
+        # المخرجات النهائية
+        final_out = self.final_up(dec_out)
+        final_out = self.final_conv(final_out)
+        
+        return self.sigmoid(final_out)
+
     # def forward(self, x):  
 
     #     input_size = x.shape[2:]
@@ -466,20 +618,20 @@ class EEMFNet(nn.Module):
     def fit(self, train_loader, test_loader=None, save_dir=None):
         num_training_steps = self.config.num_epochs
 
-        optimizer = self.opts_list[self.config.opt_name](
-            params       = filter(lambda p: p.requires_grad, self.parameters()),
-            lr           = self.config.learning_rate,  
-            weight_decay = self.config.weight_decay
-            )
+        # optimizer = self.opts_list[self.config.opt_name](
+        #     params       = filter(lambda p: p.requires_grad, self.parameters()),
+        #     lr           = self.config.learning_rate,  
+        #     weight_decay = self.config.weight_decay
+        #     )
 
-        scheduler = CosineAnnealingWarmupRestarts(
-                optimizer,
-                first_cycle_steps = num_training_steps,
-                max_lr = self.config.learning_rate,
-                min_lr = self.config.min_lr,
-                gamma= 1.0,
-                warmup_steps   = int(num_training_steps * self.config.warmup_ratio)
-                )
+        # scheduler = CosineAnnealingWarmupRestarts(
+        #         optimizer,
+        #         first_cycle_steps = num_training_steps,
+        #         max_lr = self.config.learning_rate,
+        #         min_lr = self.config.min_lr,
+        #         gamma= 1.0,
+        #         warmup_steps   = int(num_training_steps * self.config.warmup_ratio)
+        #         )
 
         # focal_criterion = FocalLoss(
         #     smooth= self.config.focal_smooth,
@@ -492,9 +644,16 @@ class EEMFNet(nn.Module):
         # composite_weight = self.config.composite_weight
         # focal_weight = self.config.focal_weight
 
-        criterion = IoUOptimizedLoss(dice_weight=0.6, focal_weight=0.4).to(self.device)
+        # criterion = IoUOptimizedLoss(dice_weight=0.6, focal_weight=0.4).to(self.device)
         # criterion = EEMFNetLoss(focal_weight=0.6, dice_weight=0.4).to(self.device)
         
+        ##############################
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+        # تهيئة النموذج ومُحسِّن Adam
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, betas=(0.9, 0.999))
+        
+        ######################################
 
         best_score = -1.0
         best_AP = -1.0
@@ -509,8 +668,8 @@ class EEMFNet(nn.Module):
             if hasattr(train_loader.dataset, "set_epoch"):
                 train_loader.dataset.set_epoch(epoch)
             # logger.info(f"Epoch {epoch}: Difficulty Level {train_loader.dataset.difficulty_level:.2f}")    
-            # self.train() 
-            self.net.train()
+            self.train() 
+            # self.net.train()
             
             # self.cnn_backbone.eval()
             # self.trans_backbone.eval()
@@ -535,9 +694,16 @@ class EEMFNet(nn.Module):
 
                 # optimizer.zero_grad(set_to_none=True)
                 
-                # outputs = self(images)
-                d0, d1, d2, d3, d4, d5, d6 = self.net(images)
-                loss2, loss = muti_bce_loss_fusion(d0, d1, d2, d3, d4, d5, d6, labels_v)
+                outputs = self(images)
+                
+                # if torch.cuda.is_available():
+                #     images, masks = Variable(images.cuda(), requires_grad=False), Variable(masks.cuda(),
+                #                                                                                 requires_grad=False)
+                # else:
+                #     images, masks = Variable(images, requires_grad=False), Variable(masks, requires_grad=False)
+
+                # d0, d1, d2, d3, d4, d5, d6 = self.net(images)
+                # loss2, loss = muti_bce_loss_fusion(d0, d1, d2, d3, d4, d5, d6, masks)
 
                 # # loss_f = focal_criterion(outputs, masks)
                 # # outputs = F.softmax(outputs, dim=1)
@@ -554,9 +720,9 @@ class EEMFNet(nn.Module):
                 # # anomaly_preds = outputs[:, 1, :, :] # استخراج قناة الشذوذ
     
                 # # loss = criterion(anomaly_preds, masks)
-                
+                loss = dice_coefficient_loss(masks, outputs[:, 0, :, :])
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+                # torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
                 optimizer.step()
                 optimizer.zero_grad()
                 
@@ -564,7 +730,7 @@ class EEMFNet(nn.Module):
                 total_loss += loss.item()
                 pbar.set_postfix({'loss': loss.item()})
 
-                del d0, d1, d2, d3, d4, d5, d6, loss2, loss
+                # del d0, d1, d2, d3, d4, d5, d6, loss2, loss
 
             pbar.close()
 
@@ -646,8 +812,8 @@ class EEMFNet(nn.Module):
             else:
                 logger.info(f"Epoch {epoch+1} finished. Avg Loss: {avg_loss:.6f}")
 
-            if epoch < self.config.num_epochs:
-                scheduler.step()
+            # if epoch < self.config.num_epochs:
+            #     scheduler.step()
 
             if self.config.use_wandb:      
                 wandb.log(log_payload, step=epoch+1)
@@ -670,22 +836,13 @@ class EEMFNet(nn.Module):
 
 
     def predict(self, test_loader):
-        # self.eval() 
-        self.net.eval()
+        self.eval() 
+        # self.net.eval()
         anomaly_maps = []
         image_scores = []
         gt_labels = []
         gt_masks = []
 
-        # normalize the predicted SOD probability map
-        def normPRED(d):
-            ma = torch.max(d)
-            mi = torch.min(d)
-        
-            dn = (d-mi)/(ma-mi)
-        
-            return dn
-            
         with torch.no_grad():
             total_inference_time = 0.0
             total_images = 0
@@ -693,12 +850,11 @@ class EEMFNet(nn.Module):
                 images, masks, labels = images.to(self.device), masks.to(self.device), labels.to(self.device)
                 
                 start_t = time.time()    
-                # outputs = self(images)
-                d1,d2,d3,d4,d5,d6,d7= self.net(images)
+                outputs = self(images)
+                # pred = self(images)
+                # d1,d2,d3,d4,d5,d6,d7= self.net(images)
 
-                # normalization
-                pred = d1[:,0,:,:]
-                pred = normPRED(pred)
+                pred = outputs[:,0,:,:]
                 anomaly_score_i = torch.topk(torch.flatten(pred, start_dim=1), 100)[0].mean(dim=1)
                 
                 image_scores.extend(anomaly_score_i.cpu())
