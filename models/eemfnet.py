@@ -229,14 +229,17 @@ class AnomalyTransplanter(nn.Module):
         
         return a_imgs, train_masks, targets
 ###########################
+from torchvision.models import resnet50, ResNet50_Weights
+import math
+
 # ==========================================
 # 1. Dynamic/Deformable Convolution (DSConv)
 # ==========================================
 class DSConv(nn.Module):
     """
     تطبيق الـ DSConv. 
-    نستخدم DeformConv2d كبديل عملي متاح في PyTorch لمحاكاة 
-    الالتفاف الديناميكي القابل للتشوه للتكيف مع حواف السجاد.
+    هذه هي الطبقة الوحيدة في الـ Encoder التي ستظل قابلة للتدريب
+    لأنها لا تنتمي لـ ResNet-50 القياسي ولا تمتلك أوزاناً مسبقة.
     """
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
         super(DSConv, self).__init__()
@@ -267,10 +270,9 @@ class DSConv(nn.Module):
 class DBottleneck(nn.Module):
     """
     نسخة معدلة من Bottleneck الخاص بـ ResNet-50.
-    يحتوي على 4 طبقات التفاف بدلاً من 3:
-    Input -> Conv1x1 -> Conv3x3 -> DSConv -> Conv1x1 -> Add
+    التسميات هنا (conv1, bn1, etc.) تطابق التسميات الرسمية لنسخ الأوزان.
     """
-    expansion = 4 # معامل التوسعة القياسي في ResNet-50
+    expansion = 4
 
     def __init__(self, in_channels, mid_channels, stride=1):
         super(DBottleneck, self).__init__()
@@ -279,11 +281,10 @@ class DBottleneck(nn.Module):
         self.conv1 = nn.Conv2d(in_channels, mid_channels, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(mid_channels)
 
-        # يتم تطبيق الـ Stride هنا لتقليل الأبعاد كما في ResNet القياسي
         self.conv2 = nn.Conv2d(mid_channels, mid_channels, kernel_size=3, stride=stride, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(mid_channels)
 
-        # إضافة DSConv كطبقة إضافية لاستخلاص الخصائص المعقدة
+        # الطبقة الإضافية (سيتم استثناؤها من التجميد)
         self.dsconv = DSConv(mid_channels, mid_channels, kernel_size=3, padding=1)
         self.bn_ds = nn.BatchNorm2d(mid_channels)
 
@@ -292,7 +293,6 @@ class DBottleneck(nn.Module):
 
         self.relu = nn.ReLU(inplace=True)
 
-        # مسار التخطي (Shortcut) لمطابقة الأبعاد
         self.downsample = nn.Sequential()
         if stride != 1 or in_channels != out_channels:
             self.downsample = nn.Sequential(
@@ -305,51 +305,70 @@ class DBottleneck(nn.Module):
 
         out = self.relu(self.bn1(self.conv1(x)))
         out = self.relu(self.bn2(self.conv2(out)))
-        out = self.relu(self.bn_ds(self.dsconv(out)))
+        out = self.relu(self.bn_ds(self.dsconv(out))) # تمرير عبر DSConv
         out = self.bn3(self.conv3(out))
 
         out += identity
         return self.relu(out)
 
 # ==========================================
-# 3. ResNet-50 D-Encoder
+# 3. ResNet-50 D-Encoder (نسخ وتجميد صريح للأوزان)
 # ==========================================
 class ResNet50_D_Encoder(nn.Module):
-    """
-    بناء الـ Encoder اعتماداً على ResNet-50 ولكن بتوزيع البلوكات [3, 6, 9] 
-    كما هو مذكور في ورقة البحث بدلاً من [3, 4, 6, 3].
-    """
-    def __init__(self, in_channels=3):
+    def __init__(self, in_channels=3, pretrained=True):
         super(ResNet50_D_Encoder, self).__init__()
         
-        # Stem (نفس بداية ResNet-50)
-        self.stem = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        )
+        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
-        # Stages (معدلة لتصبح 3, 6, 9)
-        self.stage1 = self._make_layer(in_channels=64, mid_channels=64, num_blocks=3, stride=1)
-        self.stage2 = self._make_layer(in_channels=256, mid_channels=128, num_blocks=6, stride=2)
-        self.stage3 = self._make_layer(in_channels=512, mid_channels=256, num_blocks=9, stride=2)
+        self.layer1 = self._make_layer(in_channels=64, mid_channels=64, num_blocks=3, stride=1)
+        self.layer2 = self._make_layer(in_channels=256, mid_channels=128, num_blocks=6, stride=2)
+        self.layer3 = self._make_layer(in_channels=512, mid_channels=256, num_blocks=9, stride=2)
+
+        if pretrained:
+            print("--> Fetching ResNet-50 Pre-trained Weights...")
+            official_resnet = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+            
+            # 1. النسخ المباشر للأوزان
+            self.load_state_dict(official_resnet.state_dict(), strict=False)
+            print("--> Weights copied successfully.")
+            
+            # 2. التجميد الإجباري (Brute-force Freezing)
+            frozen_count = 0
+            trainable_count = 0
+            
+            for name, param in self.named_parameters():
+                # إذا كان اسم الطبقة يحتوي على 'dsconv' أو الباتش نورم الخاص بها
+                if 'dsconv' in name or 'bn_ds' in name:
+                    param.requires_grad = True
+                    trainable_count += 1
+                else:
+                    # تجميد كل ما تبقى (والذي يمثل ResNet-50 الأصلي)
+                    param.requires_grad = False
+                    frozen_count += 1
+                    
+            print(f"--> [Done]: FROZE {frozen_count} standard ResNet-50 parameters.")
+            print(f"--> [Done]: KEPT {trainable_count} new DSConv parameters trainable.")
 
     def _make_layer(self, in_channels, mid_channels, num_blocks, stride):
         layers = []
-        # البلوك الأول في المرحلة يطبق الـ Stride
         layers.append(DBottleneck(in_channels, mid_channels, stride))
-        # باقي البلوكات تحافظ على نفس الأبعاد
         out_channels = mid_channels * DBottleneck.expansion
         for _ in range(1, num_blocks):
             layers.append(DBottleneck(out_channels, mid_channels, 1))
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        x = self.stem(x)
-        skip1 = self.stage1(x)     # Output: [B, 256, H/4, W/4]
-        skip2 = self.stage2(skip1) # Output: [B, 512, H/8, W/8]
-        skip3 = self.stage3(skip2) # Output: [B, 1024, H/16, W/16]
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        skip1 = self.layer1(x)     # Output: [B, 256, H/4, W/4]
+        skip2 = self.layer2(skip1) # Output: [B, 512, H/8, W/8]
+        skip3 = self.layer3(skip2) # Output: [B, 1024, H/16, W/16]
         return skip1, skip2, skip3
 
 # ==========================================
@@ -369,7 +388,6 @@ class EmbeddingsModule(nn.Module):
         x = self.conv2d(x)
         x = x.flatten(2).transpose(1, 2)
         
-        # التكيف الديناميكي مع حجم الصورة
         if self.position_embeddings.shape[1] != x.shape[1]:
             pos_emb = self.position_embeddings.transpose(1, 2).view(1, -1, int(math.sqrt(self.position_embeddings.shape[1])), int(math.sqrt(self.position_embeddings.shape[1])))
             pos_emb = F.interpolate(pos_emb, size=(H, W), mode='bilinear', align_corners=False)
@@ -435,8 +453,11 @@ class EEMFNet(nn.Module):
         self.config = config
 
         ##########################
-        # --- 1. ResNet-50 based D-Encoder ---
-        self.encoder = ResNet50_D_Encoder(in_channels)
+        # --- تهيئة جميع الأوزان بشكل افتراضي ---
+        self._initialize_weights()
+
+        # --- 1. ResNet-50 based D-Encoder (ينسخ ويجمد هنا) ---
+        self.encoder = ResNet50_D_Encoder(in_channels, pretrained=pretrained)
 
         # --- 2. Embeddings & Transformer ---
         hidden_size = 1024
@@ -458,11 +479,8 @@ class EEMFNet(nn.Module):
             nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2, bias=False),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.Conv2d(64, num_classes, kernel_size=1)
+            nn.Conv2d(64, num_classes, kernel_size=1) 
         )
-
-        # تهيئة الأوزان (Weight Initialization)
-        self._initialize_weights()
         
         #########################
         # backbone_name = config.backbone_name if config else "resnet18"
@@ -612,13 +630,13 @@ class EEMFNet(nn.Module):
 
     ############################
     def _initialize_weights(self):
-        """تهيئة الأوزان رياضياً لضمان الاستقرار لأننا لا نستخدم أوزان ImageNet جاهزة"""
         for m in self.modules():
-            if isinstance(m, nn.Conv2d):
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.LayerNorm):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
+
     def forward(self, x):
         # ---------- Encoder ----------
         skip1, skip2, skip3 = self.encoder(x)
@@ -779,10 +797,10 @@ class EEMFNet(nn.Module):
                 # # loss =(composite_weight * loss_c) + (focal_weight * loss_f) + loss_s
                 # loss =(composite_weight * loss_c) + (focal_weight * loss_f)
 
-                # loss = criterion(outputs, masks)
-                anomaly_preds = outputs[:, 1, :, :] # استخراج قناة الشذوذ
+                loss = criterion(outputs, masks)
+                # anomaly_preds = outputs[:, 1, :, :] # استخراج قناة الشذوذ
     
-                loss = criterion(anomaly_preds, masks)
+                # loss = criterion(anomaly_preds, masks)
                 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
