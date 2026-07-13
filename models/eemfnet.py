@@ -452,12 +452,24 @@ class EEMFNet(nn.Module):
         self.device = device
         self.config = config
 
+        self.augmenter = AnomalyTransplanter(
+            anomaly_root_dir="datasets/anomaly_generation_datasets/images",
+            target = "carpet",
+            img_size=224, 
+            p_anomaly=0.5,  # 1.0 لضمان ظهور الشذوذ في كل صور الباتش للتجربة
+            p_blur=1.0,     
+            p_illum=1.0     
+        ).to(device)
+
+        self.evaluator = AnomalyEvaluator(pro_integration_limit=0.3)
+
+
         ##########################
         # --- تهيئة جميع الأوزان بشكل افتراضي ---
         self._initialize_weights()
 
         # --- 1. ResNet-50 based D-Encoder (ينسخ ويجمد هنا) ---
-        self.encoder = ResNet50_D_Encoder(in_channels, pretrained=pretrained)
+        self.encoder = ResNet50_D_Encoder(in_channels, pretrained=True)
 
         # --- 2. Embeddings & Transformer ---
         hidden_size = 1024
@@ -505,14 +517,7 @@ class EEMFNet(nn.Module):
 
         # cnn_channels = self.cnn_backbone.feature_info.channels()
         
-        # self.augmenter = AnomalyTransplanter(
-        #     anomaly_root_dir="datasets/anomaly_generation_datasets/images",
-        #     target = "carpet",
-        #     img_size=224, 
-        #     p_anomaly=0.5,  # 1.0 لضمان ظهور الشذوذ في كل صور الباتش للتجربة
-        #     p_blur=1.0,     
-        #     p_illum=1.0     
-        # ).to(device)
+        
 
         # mit_dims = (64, 128, 320, 512)
         # self.trans_backbone = MiT(channels=3, dims=mit_dims, n_heads=(1, 2, 5, 8),
@@ -624,7 +629,6 @@ class EEMFNet(nn.Module):
         # # self.msff = MSFF(self.target_channels[1:-1]).to(self.device)
         # # self.decoder = Decoder(in_channels).to(self.device)
         # self.decoder = Decoder(self.target_channels).to(self.device)
-        # self.evaluator = AnomalyEvaluator(pro_integration_limit=0.3)
         # self.cnn_backbone.to(self.device)
         self.to(self.device)
 
@@ -743,8 +747,8 @@ class EEMFNet(nn.Module):
         # composite_weight = self.config.composite_weight
         # focal_weight = self.config.focal_weight
 
-        # criterion = IoUOptimizedLoss(dice_weight=0.6, focal_weight=0.4).to(self.device)
-        criterion = EEMFNetLoss(focal_weight=0.6, dice_weight=0.4).to(self.device)
+        criterion = IoUOptimizedLoss(dice_weight=0.6, focal_weight=0.4).to(self.device)
+        # criterion = EEMFNetLoss(focal_weight=0.6, dice_weight=0.4).to(self.device)
         
 
         best_score = -1.0
@@ -761,7 +765,7 @@ class EEMFNet(nn.Module):
                 train_loader.dataset.set_epoch(epoch)
             # logger.info(f"Epoch {epoch}: Difficulty Level {train_loader.dataset.difficulty_level:.2f}")    
             self.train() 
-            self.cnn_backbone.eval()
+            # self.cnn_backbone.eval()
             # self.trans_backbone.eval()
             # self.cnn_backbone.layer4.train()
             total_loss = 0
