@@ -3,52 +3,52 @@ import segmentation_models_pytorch.losses as losses
 import torch
 import torch.nn.functional as F
 
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2.0):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
+# class FocalLoss(nn.Module):
+#     def __init__(self, alpha=0.25, gamma=2.0):
+#         super(FocalLoss, self).__init__()
+#         self.alpha = alpha
+#         self.gamma = gamma
 
-    def forward(self, inputs, targets):
-        # inputs يجب أن تكون (Logits) قبل الـ Sigmoid/Softmax
-        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
-        pt = torch.exp(-bce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
-        return focal_loss.mean()
+#     def forward(self, inputs, targets):
+#         # inputs يجب أن تكون (Logits) قبل الـ Sigmoid/Softmax
+#         bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+#         pt = torch.exp(-bce_loss)
+#         focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+#         return focal_loss.mean()
 
-class DiceLoss(nn.Module):
-    def __init__(self, smooth=1.0):
-        super(DiceLoss, self).__init__()
-        self.smooth = smooth
+# class DiceLoss(nn.Module):
+#     def __init__(self, smooth=1.0):
+#         super(DiceLoss, self).__init__()
+#         self.smooth = smooth
 
-    def forward(self, inputs, targets):
-        # تطبيق Sigmoid للحصول على احتمالات بين 0 و 1
-        inputs = torch.sigmoid(inputs)
+#     def forward(self, inputs, targets):
+#         # تطبيق Sigmoid للحصول على احتمالات بين 0 و 1
+#         inputs = torch.sigmoid(inputs)
         
-        # تسطيح المصفوفات (Flatten)
-        inputs = inputs.view(-1)
-        targets = targets.view(-1)
+#         # تسطيح المصفوفات (Flatten)
+#         inputs = inputs.view(-1)
+#         targets = targets.view(-1)
         
-        intersection = (inputs * targets).sum()
-        dice = (2. * intersection + self.smooth) / (inputs.sum() + targets.sum() + self.smooth)
-        return 1 - dice
+#         intersection = (inputs * targets).sum()
+#         dice = (2. * intersection + self.smooth) / (inputs.sum() + targets.sum() + self.smooth)
+#         return 1 - dice
 
-class EEMFNetLoss(nn.Module):
-    def __init__(self, focal_weight=0.5, dice_weight=0.5):
-        super(EEMFNetLoss, self).__init__()
-        self.focal_weight = focal_weight
-        self.dice_weight = dice_weight
-        self.focal = FocalLoss(gamma=2.0)
-        self.dice = DiceLoss()
+# class EEMFNetLoss(nn.Module):
+#     def __init__(self, focal_weight=0.5, dice_weight=0.5):
+#         super(EEMFNetLoss, self).__init__()
+#         self.focal_weight = focal_weight
+#         self.dice_weight = dice_weight
+#         self.focal = FocalLoss(gamma=2.0)
+#         self.dice = DiceLoss()
 
-    def forward(self, preds, masks):
-        # preds: مخرجات الموديل (Logits)
-        # masks: الماسك الحقيقي (Ground Truth)
-        loss_focal = self.focal(preds, masks)
-        loss_dice = self.dice(preds, masks)
+#     def forward(self, preds, masks):
+#         # preds: مخرجات الموديل (Logits)
+#         # masks: الماسك الحقيقي (Ground Truth)
+#         loss_focal = self.focal(preds, masks)
+#         loss_dice = self.dice(preds, masks)
         
-        total_loss = (self.focal_weight * loss_focal) + (self.dice_weight * loss_dice)
-        return total_loss
+#         total_loss = (self.focal_weight * loss_focal) + (self.dice_weight * loss_dice)
+#         return total_loss
 
 # class DiceLoss(nn.Module):
 #     """
@@ -152,36 +152,36 @@ class FocalLoss(nn.Module):
         return focal_loss.mean()
 
 
-class CompositeLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.dice = losses.DiceLoss(mode='binary')
-        self.bce = nn.BCEWithLogitsLoss()
+# class CompositeLoss(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.dice = losses.DiceLoss(mode='binary')
+#         self.bce = nn.BCEWithLogitsLoss()
 
-    def forward(self, y_pred, y_true):
-        return 0.5 * self.bce(y_pred, y_true) + 0.5 * self.dice(y_pred, y_true)
+#     def forward(self, y_pred, y_true):
+#         return 0.5 * self.bce(y_pred, y_true) + 0.5 * self.dice(y_pred, y_true)
 
-class SpectralLoss(nn.Module):
-    def __init__(self, loss_weight=0.1):
-        super().__init__()
-        self.loss_weight = loss_weight
-        self.l1_loss = nn.L1Loss()
+# class SpectralLoss(nn.Module):
+#     def __init__(self, loss_weight=0.1):
+#         super().__init__()
+#         self.loss_weight = loss_weight
+#         self.l1_loss = nn.L1Loss()
 
-    def forward(self, pred, target):
-        if pred.shape != target.shape:
-            target = F.interpolate(target, size=pred.shape[2:], mode='nearest')
+#     def forward(self, pred, target):
+#         if pred.shape != target.shape:
+#             target = F.interpolate(target, size=pred.shape[2:], mode='nearest')
             
-        pred_prob = torch.sigmoid(pred) if pred.min() < 0 or pred.max() > 1 else pred
+#         pred_prob = torch.sigmoid(pred) if pred.min() < 0 or pred.max() > 1 else pred
         
-        fft_pred = torch.fft.rfft2(pred_prob, norm='ortho')
-        fft_target = torch.fft.rfft2(target.float(), norm='ortho')
+#         fft_pred = torch.fft.rfft2(pred_prob, norm='ortho')
+#         fft_target = torch.fft.rfft2(target.float(), norm='ortho')
         
-        amp_pred = torch.abs(fft_pred)
-        amp_target = torch.abs(fft_target)
+#         amp_pred = torch.abs(fft_pred)
+#         amp_target = torch.abs(fft_target)
         
-        log_amp_pred = torch.log(amp_pred + 1e-8)
-        log_amp_target = torch.log(amp_target + 1e-8)
+#         log_amp_pred = torch.log(amp_pred + 1e-8)
+#         log_amp_target = torch.log(amp_target + 1e-8)
         
-        spectral_distance = self.l1_loss(log_amp_pred, log_amp_target)
+#         spectral_distance = self.l1_loss(log_amp_pred, log_amp_target)
         
-        return self.loss_weight * spectral_distance
+#         return self.loss_weight * spectral_distance
