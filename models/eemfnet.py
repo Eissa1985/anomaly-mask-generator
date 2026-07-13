@@ -672,7 +672,7 @@ class EEMFNet(nn.Module):
             self.train() 
             # self.net.train()
             
-            # self.cnn_backbone.eval()
+            self.cnn_backbone.eval()
             # self.trans_backbone.eval()
             # self.cnn_backbone.layer4.train()
             total_loss = 0
