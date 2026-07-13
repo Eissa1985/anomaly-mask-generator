@@ -368,7 +368,7 @@ class EEMFNet(nn.Module):
         backbone_name = config.backbone_name if config else "resnet18"
 
         #################
-        self.cnn_backbone = timm.create_model(
+        self.cnn_backbone = create_model(
             backbone_name,
             pretrained=True,
             in_chans=in_channels,
