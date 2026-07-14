@@ -572,7 +572,8 @@ class EEMFNet(nn.Module):
     def forward(self, x):  
 
         input_size = x.shape[2:]
-        cnn_feats = self.cnn_backbone(x)
+        # cnn_feats = self.cnn_backbone(x)
+        features = self.cnn_backbone(x)
 
         # trans_feats = self.trans_backbone(x)
         # hybrid_raw_features = [cnn_feats[0]]  # الطبقة الأولى تبقى CNN نقية
@@ -582,10 +583,10 @@ class EEMFNet(nn.Module):
         #     hybrid_raw_features.append(fused)
         
         # 3. توحيد القنوات (Projections)
-        features = []
+        # features = []
         # for i, (proj, feat) in enumerate(zip(self.projections, cnn_feats)):
-        for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
-            features.append(proj(feat))
+        # # for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
+        #     features.append(proj(feat))
         
         f_in = features[0]
         f_out = features[-1]
@@ -621,20 +622,20 @@ class EEMFNet(nn.Module):
     def fit(self, train_loader, test_loader=None, save_dir=None):
         num_training_steps = self.config.num_epochs
 
-        # optimizer = self.opts_list[self.config.opt_name](
-        #     params       = filter(lambda p: p.requires_grad, self.parameters()),
-        #     lr           = self.config.learning_rate,  
-        #     weight_decay = self.config.weight_decay
-        #     )
+        optimizer = self.opts_list[self.config.opt_name](
+            params       = filter(lambda p: p.requires_grad, self.parameters()),
+            lr           = self.config.learning_rate,  
+            weight_decay = self.config.weight_decay
+            )
 
-        # scheduler = CosineAnnealingWarmupRestarts(
-        #         optimizer,
-        #         first_cycle_steps = num_training_steps,
-        #         max_lr = self.config.learning_rate,
-        #         min_lr = self.config.min_lr,
-        #         gamma= 1.0,
-        #         warmup_steps   = int(num_training_steps * self.config.warmup_ratio)
-        #         )
+        scheduler = CosineAnnealingWarmupRestarts(
+                optimizer,
+                first_cycle_steps = num_training_steps,
+                max_lr = self.config.learning_rate,
+                min_lr = self.config.min_lr,
+                gamma= 1.0,
+                warmup_steps   = int(num_training_steps * self.config.warmup_ratio)
+                )
 
         # focal_criterion = FocalLoss(
         #     smooth= self.config.focal_smooth,
@@ -653,8 +654,8 @@ class EEMFNet(nn.Module):
         ##############################
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-        # تهيئة النموذج ومُحسِّن Adam
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, betas=(0.9, 0.999))
+        # # تهيئة النموذج ومُحسِّن Adam
+        # optimizer = torch.optim.Adam(self.parameters(), lr=1e-3, betas=(0.9, 0.999))
         
         ######################################
 
@@ -815,8 +816,8 @@ class EEMFNet(nn.Module):
             else:
                 logger.info(f"Epoch {epoch+1} finished. Avg Loss: {avg_loss:.6f}")
 
-            # if epoch < self.config.num_epochs:
-            #     scheduler.step()
+            if epoch < self.config.num_epochs:
+                scheduler.step()
 
             if self.config.use_wandb:      
                 wandb.log(log_payload, step=epoch+1)
@@ -854,6 +855,7 @@ class EEMFNet(nn.Module):
                 
                 start_t = time.time()    
                 outputs = self(images)
+                outputs = F.softmax(outputs, dim=1)
                 # pred = self(images)
                 # d1,d2,d3,d4,d5,d6,d7= self.net(images)
 
