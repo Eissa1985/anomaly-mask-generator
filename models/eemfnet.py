@@ -284,62 +284,62 @@ class AnomalyTransplanter(nn.Module):
         return a_imgs, train_masks, targets
 
 ########################
-# ==========================================
-# 2. Network Blocks (وحدات بناء الشبكة)
-# ==========================================
-class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels, dropout_rate=0.2):
-        super(DoubleConv, self).__init__()
-        self.step1 = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.Dropout2d(dropout_rate),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-        self.step2 = nn.Sequential(
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.Dropout2d(dropout_rate),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
+# # ==========================================
+# # 2. Network Blocks (وحدات بناء الشبكة)
+# # ==========================================
+# class DoubleConv(nn.Module):
+#     def __init__(self, in_channels, out_channels, dropout_rate=0.2):
+#         super(DoubleConv, self).__init__()
+#         self.step1 = nn.Sequential(
+#             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+#             nn.Dropout2d(dropout_rate),
+#             nn.BatchNorm2d(out_channels),
+#             nn.ReLU(inplace=True)
+#         )
+#         self.step2 = nn.Sequential(
+#             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+#             nn.Dropout2d(dropout_rate),
+#             nn.BatchNorm2d(out_channels),
+#             nn.ReLU(inplace=True)
+#         )
 
-    def forward(self, x):
-        x = self.step1(x)
-        x = self.step2(x)
-        return x
+#     def forward(self, x):
+#         x = self.step1(x)
+#         x = self.step2(x)
+#         return x
 
-# ملاحظة: تم حذف EncoderBlock لأننا سنستخدم cnn_backbone بدلاً منه
+# # ملاحظة: تم حذف EncoderBlock لأننا سنستخدم cnn_backbone بدلاً منه
 
-class SpatialAttentionBlock(nn.Module):
-    def __init__(self):
-        super(SpatialAttentionBlock, self).__init__()
-        self.conv = nn.Conv2d(in_channels=2, out_channels=1, kernel_size=7, padding=3, bias=False)
-        self.sigmoid = nn.Sigmoid()
+# class SpatialAttentionBlock(nn.Module):
+#     def __init__(self):
+#         super(SpatialAttentionBlock, self).__init__()
+#         self.conv = nn.Conv2d(in_channels=2, out_channels=1, kernel_size=7, padding=3, bias=False)
+#         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x):
-        max_pool = torch.max(x, dim=1, keepdim=True)[0]
-        avg_pool = torch.mean(x, dim=1, keepdim=True)
-        concat = torch.cat([max_pool, avg_pool], dim=1)
-        attention = self.sigmoid(self.conv(concat))
-        return x * attention
+#     def forward(self, x):
+#         max_pool = torch.max(x, dim=1, keepdim=True)[0]
+#         avg_pool = torch.mean(x, dim=1, keepdim=True)
+#         concat = torch.cat([max_pool, avg_pool], dim=1)
+#         attention = self.sigmoid(self.conv(concat))
+#         return x * attention
 
-class DecoderBlock(nn.Module):
-    def __init__(self, in_channels, skip_channels, num_filters, dropout_rate=0.2):
-        super(DecoderBlock, self).__init__()
-        self.up = nn.ConvTranspose2d(in_channels, num_filters, kernel_size=3, stride=2, padding=1, output_padding=1)
-        self.conv = DoubleConv(num_filters + skip_channels, num_filters, dropout_rate)
+# class DecoderBlock(nn.Module):
+#     def __init__(self, in_channels, skip_channels, num_filters, dropout_rate=0.2):
+#         super(DecoderBlock, self).__init__()
+#         self.up = nn.ConvTranspose2d(in_channels, num_filters, kernel_size=3, stride=2, padding=1, output_padding=1)
+#         self.conv = DoubleConv(num_filters + skip_channels, num_filters, dropout_rate)
 
-    def forward(self, x, skip_features):
-        x = self.up(x)
+#     def forward(self, x, skip_features):
+#         x = self.up(x)
         
-        # مطابقة الأبعاد مكانياً في حال كان هناك اختلاف طفيف (تأمين إضافي)
-        if x.shape[2:] != skip_features.shape[2:]:
-            x = F.interpolate(x, size=skip_features.shape[2:], mode='bilinear', align_corners=False)
+#         # مطابقة الأبعاد مكانياً في حال كان هناك اختلاف طفيف (تأمين إضافي)
+#         if x.shape[2:] != skip_features.shape[2:]:
+#             x = F.interpolate(x, size=skip_features.shape[2:], mode='bilinear', align_corners=False)
             
-        x = torch.cat([x, skip_features], dim=1)
-        x = self.conv(x)
-        return x
-###################################
+#         x = torch.cat([x, skip_features], dim=1)
+#         x = self.conv(x)
+#         return x
+# ###################################
 
 class EEMFNet(nn.Module):
     # def __init__(self, device='cpu', config=None):
@@ -382,29 +382,29 @@ class EEMFNet(nn.Module):
         # استخراج قنوات الـ Backbone ديناميكياً (مثل [64, 64, 128, 256, 512] للـ ResNet34)
         cnn_channels = self.cnn_backbone.feature_info.channels()
 
-        # 2. Spatial Attention يطبق على أعمق خريطة
-        self.sa = SpatialAttentionBlock()
+        # # 2. Spatial Attention يطبق على أعمق خريطة
+        # self.sa = SpatialAttentionBlock()
 
-        # 3. بناء الـ Decoder ديناميكياً ليتكيف مع أي موديل
-        self.decoders = nn.ModuleList()
-        decoder_in_ch = cnn_channels[-1]
+        # # 3. بناء الـ Decoder ديناميكياً ليتكيف مع أي موديل
+        # self.decoders = nn.ModuleList()
+        # decoder_in_ch = cnn_channels[-1]
         
-        # بناء الـ Decoder عكسياً من القنوات العميقة إلى السطحية
-        for i in range(len(cnn_channels) - 2, -1, -1):
-            skip_ch = cnn_channels[i]
-            num_filters = skip_ch 
-            self.decoders.append(
-                DecoderBlock(decoder_in_ch, skip_ch, num_filters, dropout_rate=0.2)
-            )
-            decoder_in_ch = num_filters
+        # # بناء الـ Decoder عكسياً من القنوات العميقة إلى السطحية
+        # for i in range(len(cnn_channels) - 2, -1, -1):
+        #     skip_ch = cnn_channels[i]
+        #     num_filters = skip_ch 
+        #     self.decoders.append(
+        #         DecoderBlock(decoder_in_ch, skip_ch, num_filters, dropout_rate=0.2)
+        #     )
+        #     decoder_in_ch = num_filters
 
-        # 4. التكبير النهائي (للرجوع إلى دقة الصورة الأصلية 1/1)
-        self.final_up = nn.ConvTranspose2d(decoder_in_ch, 32, kernel_size=3, stride=2, padding=1, output_padding=1)
-        self.final_conv = nn.Sequential(
-            DoubleConv(32, 16),
-            nn.Conv2d(16, 2, kernel_size=1)
-        )
-        # self.sigmoid = nn.Sigmoid()
+        # # 4. التكبير النهائي (للرجوع إلى دقة الصورة الأصلية 1/1)
+        # self.final_up = nn.ConvTranspose2d(decoder_in_ch, 32, kernel_size=3, stride=2, padding=1, output_padding=1)
+        # self.final_conv = nn.Sequential(
+        #     DoubleConv(32, 16),
+        #     nn.Conv2d(16, 2, kernel_size=1)
+        # )
+        # # self.sigmoid = nn.Sigmoid()
         #####################
         # self.net = U2NET(3, 1)
         # self.optimizer = optim.Adam(self.net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0)
@@ -542,79 +542,81 @@ class EEMFNet(nn.Module):
         # # self.msff = MSFF(in_channels[1:-1]).to(self.device)
         # # self.msff = MSFF(self.target_channels[1:-1]).to(self.device)
         # # self.decoder = Decoder(in_channels).to(self.device)
+        self.decoder = Decoder(cnn_channels).to(self.device)
         # self.decoder = Decoder(self.target_channels).to(self.device)
         # self.cnn_backbone.to(self.device)
         self.to(self.device)
 
-    def forward(self, x):
-        # استخراج الخصائص من الـ Encoder المجمد
-        features = self.cnn_backbone(x)
+    # def forward(self, x):
+    #     # استخراج الخصائص من الـ Encoder المجمد
+    #     features = self.cnn_backbone(x)
         
-        # تطبيق الانتباه المكاني على آخر خريطة (أعمق واحدة)
-        sa = self.sa(features[-1])
+    #     # تطبيق الانتباه المكاني على آخر خريطة (أعمق واحدة)
+    #     sa = self.sa(features[-1])
         
-        # فك التشفير (Decoder)
-        dec_out = sa
-        # استبعاد الخريطة الأخيرة، وعكس الباقي لعمل مسارات التخطي
-        skip_features = features[:-1][::-1] 
+    #     # فك التشفير (Decoder)
+    #     dec_out = sa
+    #     # استبعاد الخريطة الأخيرة، وعكس الباقي لعمل مسارات التخطي
+    #     skip_features = features[:-1][::-1] 
         
-        for i, decoder in enumerate(self.decoders):
-            dec_out = decoder(dec_out, skip_features[i])
+    #     for i, decoder in enumerate(self.decoders):
+    #         dec_out = decoder(dec_out, skip_features[i])
             
-        # المخرجات النهائية
-        final_out = self.final_up(dec_out)
-        final_out = self.final_conv(final_out)
+    #     # المخرجات النهائية
+    #     final_out = self.final_up(dec_out)
+    #     final_out = self.final_conv(final_out)
         
-        # return self.sigmoid(final_out)
-        return final_out
+    #     # return self.sigmoid(final_out)
+    #     return final_out
 
-    # def forward(self, x):  
+    def forward(self, x):  
 
-    #     input_size = x.shape[2:]
-    #     cnn_feats = self.cnn_backbone(x)
+        input_size = x.shape[2:]
+        cnn_feats = self.cnn_backbone(x)
 
-    #     trans_feats = self.trans_backbone(x)
-    #     hybrid_raw_features = [cnn_feats[0]]  # الطبقة الأولى تبقى CNN نقية
-    #     for i in range(4):
-    #         # دمج مستقر عبر التركيبة المحدبة
-    #         fused = self.fusion_blocks[i](cnn_x=cnn_feats[i+1], trans_x=trans_feats[i])
-    #         hybrid_raw_features.append(fused)
+        # trans_feats = self.trans_backbone(x)
+        # hybrid_raw_features = [cnn_feats[0]]  # الطبقة الأولى تبقى CNN نقية
+        # for i in range(4):
+        #     # دمج مستقر عبر التركيبة المحدبة
+        #     fused = self.fusion_blocks[i](cnn_x=cnn_feats[i+1], trans_x=trans_feats[i])
+        #     hybrid_raw_features.append(fused)
         
-    #     # 3. توحيد القنوات (Projections)
-    #     features = []
-    #     for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
-    #         features.append(proj(feat))
+        # 3. توحيد القنوات (Projections)
+        features = []
+        # for i, (proj, feat) in enumerate(zip(self.projections, cnn_feats)):
+        for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
+            features.append(proj(feat))
         
-    #     f_in = features[0]
-    #     f_out = features[-1]
-    #     f_ii = features[1:-1]
+        f_in = features[0]
+        f_out = features[-1]
+        f_ii = features[1:-1]
 
-    #     # # 2. MSFF
-    #     # enable_msff = getattr(self.config, 'enable_msff', True)
-    #     # if enable_msff:
-    #     #     msff_outputs = self.msff(features=f_ii)
-    #     # else:
-    #     #     msff_outputs = f_ii # تخطي عملية الدمج والـ Attention
+        # # 2. MSFF
+        # enable_msff = getattr(self.config, 'enable_msff', True)
+        # if enable_msff:
+        #     msff_outputs = self.msff(features=f_ii)
+        # else:
+        #     msff_outputs = f_ii # تخطي عملية الدمج والـ Attention
 
-    #     # 3. Decoder
-    #     outputs = self.decoder(
-    #         encoder_output=f_out,
-    #         concat_features=[f_in] + f_ii
-    #     )
+        # 3. Decoder
+        outputs = self.decoder(
+            encoder_output=f_out,
+            concat_features=[f_in] + f_ii
+        )
 
-    #     if outputs.shape[2:] != input_size:
-    #         outputs = F.interpolate(
-    #             outputs,
-    #             size=input_size, 
-    #             mode='bilinear',
-    #             align_corners=True
-    #         )
+        if outputs.shape[2:] != input_size:
+            outputs = F.interpolate(
+                outputs,
+                size=input_size, 
+                mode='bilinear',
+                align_corners=True
+            )
         
-    #     # return outputs
-    #     refined_features = self.cbam(outputs)
+        return outputs
+        # refined_features = self.cbam(outputs)
         
-    #     out = self.final_conv(refined_features)
-    #     return out
+        # out = self.final_conv(refined_features)
+        # return out
 
     def fit(self, train_loader, test_loader=None, save_dir=None):
         num_training_steps = self.config.num_epochs
