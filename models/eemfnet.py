@@ -469,8 +469,8 @@ class EEMFNet(nn.Module):
         # # self.msff = MSFF(in_channels[1:-1]).to(self.device)
         # # self.msff = MSFF(self.target_channels[1:-1]).to(self.device)
         # # self.decoder = Decoder(in_channels).to(self.device)
-        self.decoder = Decoder(cnn_channels).to(self.device)
-        # self.decoder = Decoder(self.target_channels).to(self.device)
+        # self.decoder = Decoder(cnn_channels).to(self.device)
+        self.decoder = Decoder(self.target_channels).to(self.device)
         # self.cnn_backbone.to(self.device)
         self.to(self.device)
 
@@ -509,7 +509,7 @@ class EEMFNet(nn.Module):
         #     hybrid_raw_features.append(fused)
         
         # 3. توحيد القنوات (Projections)
-        # features = []
+        features = []
         for i, (proj, feat) in enumerate(zip(self.projections, cnn_feats)):
         # for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
             features.append(proj(feat))
