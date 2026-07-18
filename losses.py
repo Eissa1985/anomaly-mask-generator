@@ -10,43 +10,30 @@ class FocalLoss(nn.Module):
         self.gamma = gamma
         self.alpha = alpha
         self.smooth = smooth
+        
         if isinstance(alpha, (float, int)): self.alpha = torch.Tensor([alpha, 1 - alpha])
         if isinstance(alpha, list): self.alpha = torch.Tensor(alpha)
         self.size_average = size_average
 
+    
     def forward(self, input, target):
-        if input.dim()>2:
-            input = input.view(input.size(0), input.size(1), -1)  # N,C,H,W => N,C,H*W
-            input = input.transpose(1, 2)                         # N,C,H*W => N,H*W,C
-            input = input.contiguous().view(-1, input.size(2))    # N,H*W,C => N*H*W,C
-        target = target.view(-1, 1)
+        if input.dim() > 2:
+            input = input.view(input.size(0), input.size(1), -1)
+            input = input.transpose(1, 2)
+            input = input.contiguous().view(-1, input.size(2))
 
-        pt = input
-        logpt = (pt + 1e-5).log()
+        target = target.view(-1, 1).long() 
+        lprobs = F.log_softmax(input, dim=1)
+        
+        n_class = lprobs.size(1)
+        
+        one_hot = torch.zeros(target.size(0), n_class).to(input.device)
+        one_hot.scatter_(1, target, 1)
 
-        # add label smoothing
-        num_class = input.shape[1]
-        idx = target.cpu().long()
-
-        one_hot_key = torch.FloatTensor(target.size(0), num_class).zero_()
-        one_hot_key = one_hot_key.scatter_(1, idx, 1)
-        if one_hot_key.device != input.device:
-            one_hot_key = one_hot_key.to(input.device)
-
-        if self.smooth:
-            one_hot_key = torch.clamp(
-                one_hot_key, self.smooth, 1.0 - self.smooth)
-            logpt = logpt * one_hot_key
-
-        if self.alpha is not None:
-            if self.alpha.type() != input.data.type():
-                self.alpha = self.alpha.type_as(input.data)
-            at = self.alpha.gather(0, target.data.view(-1))
-            logpt = logpt * at
-
-        loss = (-1 * (1 - pt)**self.gamma * logpt).sum(1)
-        if self.size_average: return loss.mean()
-        else: return loss.sum()
+        smooth_target = (1 - self.smooth) * one_hot + self.smooth / n_class
+        p_t = torch.exp(lprobs.gather(1, target)) 
+        focal_loss = -1 * (1 - p_t) ** self.gamma * torch.log(p_t)
+        return focal_loss.mean()
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth=100.0):
@@ -151,10 +138,11 @@ class IoUOptimizedLoss(nn.Module):
         self.dice_weight = dice_weight
         self.focal_weight = focal_weight
         
-        self.dice_loss = DiceLoss()
+        # self.dice_loss = DiceLoss()
         self.focal_loss = FocalLoss(smooth=1e-4, gamma=0)
-        # self.dice_loss = losses.DiceLoss(mode='binary')
-        self.bce_loss = nn.L1Loss() #nn.BCEWithLogitsLoss()
+        self.dice_loss = losses.DiceLoss(mode='binary')
+        # self.bce_loss = nn.L1Loss() #
+        self.bce_loss = nn.BCEWithLogitsLoss()
 
     def forward(self, logits, targets):
         """
@@ -163,10 +151,12 @@ class IoUOptimizedLoss(nn.Module):
         """
         # 1. تحويل الخرج الخام (Logits) إلى احتمالات (Probabilities)
         # استخدام log_softmax().exp() بدلاً من softmax() للاستقرار العددي (من مكتبة SMP)
-        probs = F.softmax(logits, dim=1)
-        focal_val = self.focal_loss(probs, targets)
+        # probs = F.softmax(logits, dim=1)
+        # focal_val = self.focal_loss(probs, targets)
+        focal_val = self.focal_loss(logits, targets)
         
-        probs = probs[:, 1:2, :, :]
+        # probs = probs[:, 1:2, :, :]
+        probs = F.softmax(logits, dim=1)[:, 1:2, :, :]
         
         # 2. التأكد من تطابق أبعاد الأهداف لتجنب أخطاء الـ Broadcasting
         if targets.dim() == 3:
