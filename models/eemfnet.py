@@ -97,17 +97,17 @@ if not hasattr(np, 'trapz'):
 
 #     return loss0, loss
        
-# class ChannelProjector(nn.Module):
-#     def __init__(self, in_channels, out_channels):
-#         super(ChannelProjector, self).__init__()
-#         self.projector = nn.Sequential(
-#             nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
-#             nn.BatchNorm2d(out_channels),
-#             nn.ReLU(inplace=True)
-#         )
+class ChannelProjector(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ChannelProjector, self).__init__()
+        self.projector = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
 
-#     def forward(self, x):
-#         return self.projector(x)
+    def forward(self, x):
+        return self.projector(x)
 
 class AnomalyTransplanter(nn.Module):
     def __init__(self, anomaly_root_dir, target, img_size=224, p_anomaly=0.5, p_blur=0.3, p_illum=0.4):
@@ -459,86 +459,13 @@ class EEMFNet(nn.Module):
         # # (تم حذف self.upsampling لأنه كود ميت لا يُستخدم)
 
         # # --- د. تجهيز الأبعاد والمفكك ---
-        # self.base_dim = 48
-        # self.target_channels = [self.base_dim * (2 ** i) for i in range(len(cnn_channels))]
-
-        # self.projections = nn.ModuleList([
-        #     nn.Sequential(
-        #         nn.Conv2d(src, tgt, kernel_size=1, bias=False),
-        #         nn.GroupNorm(num_groups=8, num_channels=tgt),
-        #         nn.ReLU(inplace=True)
-        #     ) for src, tgt in zip(cnn_channels, self.target_channels)
-        # ])
+        self.base_dim = 48
+        self.target_channels = [self.base_dim * (2 ** i) for i in range(len(cnn_channels))]
+        self.projections = nn.ModuleList([
+            ChannelProjector(src, tgt)
+            for src, tgt in zip(cnn_channels, self.target_channels)
+        ])
         
-        # mit_dims = (64, 128, 320, 512)
-        # self.trans_backbone = MiT(channels=3, dims=mit_dims, n_heads=(1, 2, 5, 8),
-        #                           expansion=(8, 8, 4, 4), reduction_ratio=(8, 4, 2, 1),
-        #                           n_layers=(2, 2, 2, 2))
-
-        # try:
-        #     logger.info("--> Attempting to download official MiT-B2 weights...")
-            
-        #     weight_urls = [
-        #         "https://download.openmmlab.com/mmsegmentation/v0.5/pretrain/segformer/mit_b2_20220624-66e8bf70.pth",
-        #         "https://huggingface.co/jishi/SegFormer-mit-b2-imagenet-1k/resolve/main/mit_b2.pth"
-        #     ]
-            
-        #     state_dict = None
-        #     for url in weight_urls:
-        #         try:
-        #             logger.info(f"Downloading from: {url}")
-        #             checkpoint = torch.hub.load_state_dict_from_url(url, map_location='cpu', progress=True)
-        #             state_dict = checkpoint.get('state_dict', checkpoint.get('model', checkpoint))
-        #             break 
-        #         except Exception as dl_err:
-        #             logger.warning(f"Failed to download from {url}. Trying next source...")
-        #             continue
-            
-        #     if state_dict is None:
-        #         raise RuntimeError("All weight servers failed or are unreachable.")
-
-        #     clean_state_dict = {}
-        #     for k, v in state_dict.items():
-        #         clean_key = k.replace('backbone.', '').replace('encoder.', '')
-        #         clean_state_dict[clean_key] = v
-
-        #     missing_keys, unexpected_keys = self.trans_backbone.load_state_dict(clean_state_dict, strict=False)
-        #     logger.info("--> SUCCESS: Pre-trained MiT-B2 weights successfully injected!")
-        #     if missing_keys:
-        #         logger.debug(f"Expected unmapped keys (e.g. classification head): {len(missing_keys)} keys.")
-
-        # except Exception as e:
-        #     logger.warning(f"--> Could not inject pre-trained weights: {e}. Model will train from scratch.")
-
-        # # for p in self.trans_backbone.parameters():
-        # #     p.requires_grad = False
-        # for name, param in self.trans_backbone.named_parameters():
-        #     if "block3" in name or "block4" in name or "norm3" in name or "norm4" in name:
-        #         param.requires_grad = True
-        #     else:
-        #         param.requires_grad = False
-
-        # # --- ج. وحدات الدمج الهجين (Attentional Feature Fusion) بدلاً من CrossAttention ---
-        # self.fusion_blocks = nn.ModuleList([
-        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[1], trans_dim=mit_dims[0]),
-        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[2], trans_dim=mit_dims[1]),
-        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[3], trans_dim=mit_dims[2]),
-        #     AttentionalFeatureFusion(cnn_dim=cnn_channels[4], trans_dim=mit_dims[3])
-        # ])
-
-        # # (تم حذف self.upsampling لأنه كود ميت لا يُستخدم)
-
-        # # --- د. تجهيز الأبعاد والمفكك ---
-        # self.base_dim = 48
-        # self.target_channels = [self.base_dim * (2 ** i) for i in range(len(cnn_channels))]
-
-        # self.projections = nn.ModuleList([
-        #     nn.Sequential(
-        #         nn.Conv2d(src, tgt, kernel_size=1, bias=False),
-        #         nn.GroupNorm(num_groups=8, num_channels=tgt),
-        #         nn.ReLU(inplace=True)
-        #     ) for src, tgt in zip(cnn_channels, self.target_channels)
-        # ])
         # # self.msff = MSFF(in_channels[1:-1]).to(self.device)
         # # self.msff = MSFF(self.target_channels[1:-1]).to(self.device)
         # # self.decoder = Decoder(in_channels).to(self.device)
@@ -572,8 +499,7 @@ class EEMFNet(nn.Module):
     def forward(self, x):  
 
         input_size = x.shape[2:]
-        # cnn_feats = self.cnn_backbone(x)
-        features = self.cnn_backbone(x)
+        cnn_feats = self.cnn_backbone(x)
 
         # trans_feats = self.trans_backbone(x)
         # hybrid_raw_features = [cnn_feats[0]]  # الطبقة الأولى تبقى CNN نقية
@@ -584,9 +510,9 @@ class EEMFNet(nn.Module):
         
         # 3. توحيد القنوات (Projections)
         # features = []
-        # for i, (proj, feat) in enumerate(zip(self.projections, cnn_feats)):
-        # # for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
-        #     features.append(proj(feat))
+        for i, (proj, feat) in enumerate(zip(self.projections, cnn_feats)):
+        # for i, (proj, feat) in enumerate(zip(self.projections, hybrid_raw_features)):
+            features.append(proj(feat))
         
         f_in = features[0]
         f_out = features[-1]
