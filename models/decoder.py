@@ -187,7 +187,7 @@ class Decoder(nn.Module):
         )
 
 
-    def forward(self, encoder_output, concat_features, debug=True):
+    def forward(self, encoder_output, concat_features, debug=False):
         """
         encoder_output: أعمق ميزة (التي خرجت من Backbone مباشرة)
         concat_features: قائمة الميزات الأقل عمقاً (بما في ذلك MSFF outputs)
